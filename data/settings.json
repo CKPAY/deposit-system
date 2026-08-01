@@ -1,0 +1,28 @@
+{
+  "minDeposit": 50,
+  "maxDeposit": 50000,
+  "sessionExpiry": 20,
+  "depositEnabled": true,
+  "currency": "ETB",
+  "siteName": "Jember Bet",
+  "verifyApiKey": "vk_test_rvD9GLybjSxm1s-VNdgdrdOPYI4UcHCS",
+  "apiKeys": [
+    " VERIFY_BANK_ET_aDJ8bsL8VmttImIHbgEHq71wXDQz6ckcHlosmiUthaXqmbPvNNFXLmCSUpJV1cpa",
+    "",
+    "",
+    "",
+    ""
+  ],
+  "adminUsername": "admin",
+  "adminPassword": "ckpay2024!",
+  "adminUsers": [
+    {
+      "username": "yonirahwa123",
+      "password": "yonirahwa*#@&"
+    },
+    {
+      "username": "admin",
+      "password": "ckpay2024!"
+    }
+  ]
+}
