@@ -148,10 +148,10 @@ router.post('/init', (req, res) => {
   const transactions = readJSON('transactions.json') || [];
   const now = Date.now();
 
-  // Re-use active pending session on refresh ONLY if forceNew is not requested
+  // Re-use active pending session on refresh ONLY if forceNew is not requested and amount matches
   if (!forceNew) {
     const activeSession = transactions.find(
-      t => t.userId === String(userId) && t.status === 'pending' && t.expiresAt > now
+      t => t.userId === String(userId) && t.status === 'pending' && t.expiresAt > now && Number(t.amount) === amt
     );
     if (activeSession) {
       return res.json({
