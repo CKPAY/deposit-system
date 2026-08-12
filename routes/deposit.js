@@ -3,6 +3,10 @@ const router = express.Router();
 const fs = require('fs');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
+const jwt = require('jsonwebtoken');
+
+// Shared JWT secret key — keep this private, share only with Jember Bet!
+const JWT_SECRET = process.env.JWT_SECRET || '4fec6686d2b93ceca92531ed08dbdc48cf0b937965ebbf51b144d8f055f5d004fd85c8518ef72a1d61634949884c4346';
 
 const { saveTx, getTxById, getTxByCleanTxId, getActivePendingTx, expireOldPendingTxs } = require('../db');
 
@@ -115,6 +119,16 @@ function pickPhoneNumber(numbers, activeAssignments, userHistory = []) {
 }
 
 router.post('/init', (req, res) => {
+  // Verify JWT token signature if token is provided
+  const rawToken = req.body.token || req.headers['x-ckpay-token'] || null;
+  if (rawToken) {
+    try {
+      jwt.verify(rawToken, JWT_SECRET);
+    } catch (err) {
+      return res.status(401).json({ error: 'Invalid or expired payment token. Please start a new deposit session.' });
+    }
+  }
+
   // Support both CK-PAY and A-Pay standard parameter names
   const userId = req.body.userId || req.body.account_id || req.body.client_id;
   const amount = req.body.amount;
