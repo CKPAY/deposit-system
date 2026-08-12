@@ -1,0 +1,20 @@
+# Dependencies
+node_modules/
+
+# Local data files
+backend/data/*.json
+
+# Secret / sensitive scripts - DO NOT UPLOAD
+generate-test-links.js
+
+# Environment files
+.env
+.env.local
+.env.production
+
+# Build output
+frontend/dist/
+
+# Logs
+*.log
+npm-debug.log*
