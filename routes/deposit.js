@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
 
 // Shared JWT secret key — keep this private, share only with Jember Bet!
 const JWT_SECRET = process.env.JWT_SECRET || '4fec6686d2b93ceca92531ed08dbdc48cf0b937965ebbf51b144d8f055f5d004fd85c8518ef72a1d61634949884c4346';
@@ -534,25 +535,37 @@ router.post('/verify', (req, res) => {
           writeJSON('transactions.json', currentTxs);
           try { saveTx(currentTxs[tIdx]); } catch {}
 
-          // Webhook Callback
+          // Webhook Callback with HMAC-SHA256 Signature Verification
           if (currentTxs[tIdx].callbackUrl) {
             try {
+              const timestamp = Date.now();
+              const orderId = currentTxs[tIdx].orderId || currentTxs[tIdx].order_id || null;
+              const rawSigString = `${currentTxs[tIdx].id}:${orderId || ''}:${parsedAmt}:verified:${timestamp}`;
+              const signature = crypto.createHmac('sha256', JWT_SECRET).update(rawSigString).digest('hex');
+
+              const payload = {
+                status: 'verified',
+                sessionId: currentTxs[tIdx].id,
+                userId: currentTxs[tIdx].userId,
+                orderId: orderId,
+                requestedAmount: currentTxs[tIdx].requestedAmount || currentTxs[tIdx].amount,
+                verifiedAmount: parsedAmt,
+                amount: parsedAmt,
+                transactionId: currentTxs[tIdx].transactionId,
+                phoneNumber: currentTxs[tIdx].phoneNumber,
+                payer: result.receipt.payer || null,
+                receiver: result.receipt.receiver || null,
+                timestamp: timestamp,
+                signature: signature
+              };
+
               fetch(currentTxs[tIdx].callbackUrl, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  status: 'verified',
-                  sessionId: currentTxs[tIdx].id,
-                  userId: currentTxs[tIdx].userId,
-                  requestedAmount: currentTxs[tIdx].requestedAmount,
-                  verifiedAmount: parsedAmt,
-                  amount: parsedAmt,
-                  transactionId: currentTxs[tIdx].transactionId,
-                  phoneNumber: currentTxs[tIdx].phoneNumber,
-                  payer: result.receipt.payer || null,
-                  receiver: result.receipt.receiver || null,
-                  timestamp: Date.now()
-                })
+                headers: {
+                  'Content-Type': 'application/json',
+                  'X-CKPAY-Signature': signature
+                },
+                body: JSON.stringify(payload)
               }).catch(err => console.error('Webhook error:', err));
             } catch (e) {}
           }
@@ -592,20 +605,32 @@ router.post('/verify', (req, res) => {
 
           if (currentTxs[tIdx].callbackUrl) {
             try {
+              const timestamp = Date.now();
+              const orderId = currentTxs[tIdx].orderId || currentTxs[tIdx].order_id || null;
+              const rawSigString = `${currentTxs[tIdx].id}:${orderId || ''}:${verifiedAmt}:verified:${timestamp}`;
+              const signature = crypto.createHmac('sha256', JWT_SECRET).update(rawSigString).digest('hex');
+
+              const payload = {
+                status: 'verified',
+                sessionId: currentTxs[tIdx].id,
+                userId: currentTxs[tIdx].userId,
+                orderId: orderId,
+                requestedAmount: currentTxs[tIdx].requestedAmount || currentTxs[tIdx].amount,
+                verifiedAmount: verifiedAmt,
+                amount: verifiedAmt,
+                transactionId: currentTxs[tIdx].transactionId,
+                phoneNumber: currentTxs[tIdx].phoneNumber,
+                timestamp: timestamp,
+                signature: signature
+              };
+
               fetch(currentTxs[tIdx].callbackUrl, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  status: 'verified',
-                  sessionId: currentTxs[tIdx].id,
-                  userId: currentTxs[tIdx].userId,
-                  requestedAmount: currentTxs[tIdx].requestedAmount,
-                  verifiedAmount: verifiedAmt,
-                  amount: verifiedAmt,
-                  transactionId: currentTxs[tIdx].transactionId,
-                  phoneNumber: currentTxs[tIdx].phoneNumber,
-                  timestamp: Date.now()
-                })
+                headers: {
+                  'Content-Type': 'application/json',
+                  'X-CKPAY-Signature': signature
+                },
+                body: JSON.stringify(payload)
               }).catch(err => console.error('Webhook error:', err));
             } catch (e) {}
           }
