@@ -179,6 +179,36 @@ function pickPhoneNumber(numbers, activeAssignments, userHistory = []) {
   return minCandidates[randomIndex].phone;
 }
 
+router.post('/test-callback', (req, res) => {
+  const callbackUrl = req.body.callbackUrl || req.body.callback_url || null;
+  const orderId = req.body.orderId || req.body.order_id || '56031b32-a1c8-4fce-93bd-92213c6e14d5';
+  const amount = Number(req.body.amount || req.body.verifiedAmount || 100);
+  const status = req.body.status || 'verified';
+  const userId = req.body.userId || req.body.user_id || 'TEST_USER_9921';
+
+  if (!callbackUrl) {
+    return res.status(400).json({ error: 'Missing callbackUrl in body' });
+  }
+
+  const dummyTx = {
+    id: uuidv4(),
+    userId: userId,
+    orderId: orderId,
+    requestedAmount: amount,
+    phoneNumber: '0911223344',
+    transactionId: 'TEST_RECEIPT_' + Math.floor(Math.random() * 900000 + 100000)
+  };
+
+  const payload = createWebhookPayload(dummyTx, status, amount);
+  sendWebhookWithRetry(callbackUrl, payload);
+
+  res.json({
+    success: true,
+    message: `Test callback sent to ${callbackUrl}`,
+    payload
+  });
+});
+
 router.post('/init', (req, res) => {
   // Verify JWT token signature if token is provided
   const rawToken = req.body.token || req.headers['x-ckpay-token'] || null;
