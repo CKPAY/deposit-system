@@ -9,6 +9,66 @@ const crypto = require('crypto');
 // Shared JWT secret key — keep this private, share only with Jember Bet!
 const JWT_SECRET = process.env.JWT_SECRET || '4fec6686d2b93ceca92531ed08dbdc48cf0b937965ebbf51b144d8f055f5d004fd85c8518ef72a1d61634949884c4346';
 
+// Standardized Webhook Payload Generator for ALL 3 statuses (verified, failed, expired)
+function createWebhookPayload(tx, status, verifiedAmt = 0, receiptData = {}, errorMessage = null) {
+  const timestamp = Date.now();
+  const orderId = tx.orderId || tx.order_id || null;
+  const verifiedAmount = Number(verifiedAmt) || 0;
+  
+  const rawSigString = `${tx.id}:${orderId || ''}:${verifiedAmount}:${status}:${timestamp}`;
+  const signature = crypto.createHmac('sha256', JWT_SECRET).update(rawSigString).digest('hex');
+
+  return {
+    status,
+    sessionId: tx.id,
+    userId: tx.userId,
+    orderId: orderId,
+    requestedAmount: tx.requestedAmount || tx.amount || 0,
+    verifiedAmount: verifiedAmount,
+    amount: verifiedAmount,
+    transactionId: tx.transactionId || null,
+    phoneNumber: tx.phoneNumber || null,
+    payer: receiptData.payer || null,
+    receiver: receiptData.receiver || null,
+    error: errorMessage || tx.failReason || null,
+    timestamp: timestamp,
+    signature: signature
+  };
+}
+
+// Webhook Dispatcher with Automatic 3x Retry Mechanism (5-second delay between attempts)
+async function sendWebhookWithRetry(callbackUrl, payload, maxRetries = 3) {
+  if (!callbackUrl) return;
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const response = await fetch(callbackUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-CKPAY-Signature': payload.signature
+        },
+        body: JSON.stringify(payload)
+      });
+
+      if (response.ok) {
+        console.log(`Webhook delivered successfully to ${callbackUrl} (Attempt ${attempt})`);
+        return true;
+      } else {
+        console.warn(`Webhook attempt ${attempt} failed with HTTP status ${response.status}`);
+      }
+    } catch (err) {
+      console.error(`Webhook attempt ${attempt} error:`, err.message);
+    }
+
+    if (attempt < maxRetries) {
+      await new Promise(resolve => setTimeout(resolve, 5000));
+    }
+  }
+
+  return false;
+}
+
 const { saveTx, getTxById, getTxByCleanTxId, getActivePendingTx, expireOldPendingTxs } = require('../db');
 
 const dataDir = path.join(__dirname, '../data');
@@ -462,6 +522,12 @@ router.post('/verify', (req, res) => {
   if (Date.now() > tx.expiresAt) {
     transactions[idx].status = 'expired';
     writeJSON('transactions.json', transactions);
+
+    if (transactions[idx].callbackUrl) {
+      const payload = createWebhookPayload(transactions[idx], 'expired', 0, {}, 'Session has expired');
+      sendWebhookWithRetry(transactions[idx].callbackUrl, payload);
+    }
+
     return res.status(400).json({ error: 'Session has expired' });
   }
 
@@ -496,6 +562,11 @@ router.post('/verify', (req, res) => {
           currentTxs[tIdx].status = 'failed';
           currentTxs[tIdx].failReason = 'This deposit phone number is no longer active. Please start a new deposit session.';
           writeJSON('transactions.json', currentTxs);
+
+          if (currentTxs[tIdx].callbackUrl) {
+            const payload = createWebhookPayload(currentTxs[tIdx], 'failed', 0, {}, currentTxs[tIdx].failReason);
+            sendWebhookWithRetry(currentTxs[tIdx].callbackUrl, payload);
+          }
           return;
         }
 
@@ -505,6 +576,11 @@ router.post('/verify', (req, res) => {
             currentTxs[tIdx].status = 'failed';
             currentTxs[tIdx].failReason = 'Transaction was not sent to an active deposit phone number.';
             writeJSON('transactions.json', currentTxs);
+
+            if (currentTxs[tIdx].callbackUrl) {
+              const payload = createWebhookPayload(currentTxs[tIdx], 'failed', 0, {}, currentTxs[tIdx].failReason);
+              sendWebhookWithRetry(currentTxs[tIdx].callbackUrl, payload);
+            }
             return;
           }
 
@@ -518,6 +594,11 @@ router.post('/verify', (req, res) => {
             currentTxs[tIdx].status = 'failed';
             currentTxs[tIdx].failReason = `Verified amount (${parsedAmt.toFixed(2)} ETB) is below minimum deposit limit of ${minDeposit} ETB.`;
             writeJSON('transactions.json', currentTxs);
+
+            if (currentTxs[tIdx].callbackUrl) {
+              const payload = createWebhookPayload(currentTxs[tIdx], 'failed', 0, {}, currentTxs[tIdx].failReason);
+              sendWebhookWithRetry(currentTxs[tIdx].callbackUrl, payload);
+            }
             return;
           }
 
@@ -525,6 +606,11 @@ router.post('/verify', (req, res) => {
             currentTxs[tIdx].status = 'failed';
             currentTxs[tIdx].failReason = `Verified amount (${parsedAmt.toFixed(2)} ETB) exceeds maximum deposit limit of ${maxDeposit} ETB.`;
             writeJSON('transactions.json', currentTxs);
+
+            if (currentTxs[tIdx].callbackUrl) {
+              const payload = createWebhookPayload(currentTxs[tIdx], 'failed', 0, {}, currentTxs[tIdx].failReason);
+              sendWebhookWithRetry(currentTxs[tIdx].callbackUrl, payload);
+            }
             return;
           }
 
@@ -535,44 +621,22 @@ router.post('/verify', (req, res) => {
           writeJSON('transactions.json', currentTxs);
           try { saveTx(currentTxs[tIdx]); } catch {}
 
-          // Webhook Callback with HMAC-SHA256 Signature Verification
+          // Webhook Callback with HMAC-SHA256 Signature Verification & Retries
           if (currentTxs[tIdx].callbackUrl) {
-            try {
-              const timestamp = Date.now();
-              const orderId = currentTxs[tIdx].orderId || currentTxs[tIdx].order_id || null;
-              const rawSigString = `${currentTxs[tIdx].id}:${orderId || ''}:${parsedAmt}:verified:${timestamp}`;
-              const signature = crypto.createHmac('sha256', JWT_SECRET).update(rawSigString).digest('hex');
-
-              const payload = {
-                status: 'verified',
-                sessionId: currentTxs[tIdx].id,
-                userId: currentTxs[tIdx].userId,
-                orderId: orderId,
-                requestedAmount: currentTxs[tIdx].requestedAmount || currentTxs[tIdx].amount,
-                verifiedAmount: parsedAmt,
-                amount: parsedAmt,
-                transactionId: currentTxs[tIdx].transactionId,
-                phoneNumber: currentTxs[tIdx].phoneNumber,
-                payer: result.receipt.payer || null,
-                receiver: result.receipt.receiver || null,
-                timestamp: timestamp,
-                signature: signature
-              };
-
-              fetch(currentTxs[tIdx].callbackUrl, {
-                method: 'POST',
-                headers: {
-                  'Content-Type': 'application/json',
-                  'X-CKPAY-Signature': signature
-                },
-                body: JSON.stringify(payload)
-              }).catch(err => console.error('Webhook error:', err));
-            } catch (e) {}
+            const payload = createWebhookPayload(currentTxs[tIdx], 'verified', parsedAmt, result.receipt);
+            sendWebhookWithRetry(currentTxs[tIdx].callbackUrl, payload);
           }
         } else {
           // Verification failed on verify.et
           currentTxs[tIdx].status = 'failed';
           currentTxs[tIdx].failReason = result.message || 'Invalid transaction ID or receipt not found';
+          writeJSON('transactions.json', currentTxs);
+          try { saveTx(currentTxs[tIdx]); } catch {}
+
+          if (currentTxs[tIdx].callbackUrl) {
+            const payload = createWebhookPayload(currentTxs[tIdx], 'failed', 0, {}, currentTxs[tIdx].failReason);
+            sendWebhookWithRetry(currentTxs[tIdx].callbackUrl, payload);
+          }
         }
       }
     } else {
