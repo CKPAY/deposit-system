@@ -180,26 +180,28 @@ function pickPhoneNumber(numbers, activeAssignments, userHistory = []) {
 }
 
 router.post('/test-callback', (req, res) => {
-  const callbackUrl = req.body.callbackUrl || req.body.callback_url || null;
   const orderId = req.body.orderId || req.body.order_id || '56031b32-a1c8-4fce-93bd-92213c6e14d5';
-  const amount = Number(req.body.amount || req.body.verifiedAmount || 100);
   const status = req.body.status || 'verified';
-  const userId = req.body.userId || req.body.user_id || 'TEST_USER_9921';
+  
+  const transactions = readJSON('transactions.json') || [];
+  const foundTx = orderId ? transactions.find(t => t.orderId === orderId || t.id === orderId) : null;
+  
+  const callbackUrl = req.body.callbackUrl || req.body.callback_url || foundTx?.callbackUrl || 'https://cbtestpayment.testenvh.com/CKPay/process';
+  const amount = Number(req.body.amount || req.body.verifiedAmount || foundTx?.requestedAmount || foundTx?.amount || 100);
+  const userId = req.body.userId || req.body.user_id || foundTx?.userId || 'TEST_USER_9921';
+  const sessionId = foundTx?.id || orderId || uuidv4();
+  const phoneNumber = foundTx?.phoneNumber || '0911223344';
 
-  if (!callbackUrl) {
-    return res.status(400).json({ error: 'Missing callbackUrl in body' });
-  }
-
-  const dummyTx = {
-    id: uuidv4(),
+  const txObj = {
+    id: sessionId,
     userId: userId,
     orderId: orderId,
     requestedAmount: amount,
-    phoneNumber: '0911223344',
-    transactionId: 'TEST_RECEIPT_' + Math.floor(Math.random() * 900000 + 100000)
+    phoneNumber: phoneNumber,
+    transactionId: 'DES' + Math.floor(Math.random() * 900000 + 100000)
   };
 
-  const payload = createWebhookPayload(dummyTx, status, amount);
+  const payload = createWebhookPayload(txObj, status, status === 'verified' ? amount : 0);
   sendWebhookWithRetry(callbackUrl, payload);
 
   res.json({
