@@ -125,20 +125,20 @@ function extractTransactionId(text) {
   if (!str) return null;
 
   const matchTxNum = str.match(/transaction\s+number\s+is\s+([A-Za-z0-9]{8,20})/i);
-  if (matchTxNum && matchTxNum[1]) return matchTxNum[1].trim();
+  if (matchTxNum && matchTxNum[1]) return matchTxNum[1].trim().toUpperCase();
 
   const matchReceipt = str.match(/receipt\/([A-Za-z0-9]{8,20})/i);
-  if (matchReceipt && matchReceipt[1]) return matchReceipt[1].trim();
+  if (matchReceipt && matchReceipt[1]) return matchReceipt[1].trim().toUpperCase();
 
   const matchTxId = str.match(/(?:transaction\s*id|txid|txn|ref)\s*[:=]?\s*([A-Za-z0-9]{8,20})/i);
-  if (matchTxId && matchTxId[1]) return matchTxId[1].trim();
+  if (matchTxId && matchTxId[1]) return matchTxId[1].trim().toUpperCase();
 
   if (!/\s/.test(str)) {
     const isAlphanumericCode = /^[A-Za-z0-9]{8,20}$/.test(str);
-    if (isAlphanumericCode) return str;
+    if (isAlphanumericCode) return str.toUpperCase();
   }
 
-  return str.split(/\s+/)[0];
+  return str.split(/\s+/)[0].toUpperCase();
 }
 
 function getActiveAssignments(assignmentsData) {
