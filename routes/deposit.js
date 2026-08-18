@@ -430,7 +430,7 @@ async function pollVerifyEtStatus(apiKey, requestId) {
   };
 }
 
-async function verifyWithVerifyEt(apiKey, transactionId, phoneNumber) {
+async function verifyWithVerifyEt(apiKey, transactionId) {
   try {
     const res = await fetch('https://verify.et/api/verify?waitMs=5000', {
       method: 'POST',
@@ -441,7 +441,6 @@ async function verifyWithVerifyEt(apiKey, transactionId, phoneNumber) {
       body: JSON.stringify({
         bank: 'telebirr',
         transactionNumber: transactionId,
-        settlementAccount: phoneNumber || undefined,
       }),
     });
 
@@ -469,14 +468,6 @@ async function verifyWithVerifyEt(apiKey, transactionId, phoneNumber) {
       };
     }
 
-    if (item.settlementAccountMatch && item.settlementAccountMatch.matched === false) {
-      return {
-        success: false,
-        message: 'Transaction was not sent to the assigned deposit phone number.',
-        code: 'SETTLEMENT_MISMATCH',
-      };
-    }
-
     return {
       success: true,
       message: 'Transaction verified successfully.',
@@ -487,7 +478,7 @@ async function verifyWithVerifyEt(apiKey, transactionId, phoneNumber) {
         receiver: item.receiverName || item.receiver || 'Merchant',
         amount: String(item.amount || '0'),
         date: item.timestamp || item.date || new Date().toISOString(),
-        creditedAccount: item.receiverAccount || item.creditedAccount || phoneNumber,
+        creditedAccount: item.receiverAccount || item.creditedAccount || '',
       },
     };
   } catch (err) {
@@ -503,7 +494,11 @@ async function verifyWithVerifyEtMultiKey(settings, transactionId, targetPhoneNu
   const apiKeys = Array.isArray(settings.apiKeys) ? settings.apiKeys : [];
   const primaryKey = getApiKeyForPhone(targetPhoneNumber, settings);
 
-  const keysToTry = [primaryKey];
+  // Build unique list of all configured API keys, trying primary phone key first
+  const keysToTry = [];
+  if (primaryKey && primaryKey.trim() && !primaryKey.includes('_placeholder')) {
+    keysToTry.push(primaryKey.trim());
+  }
   apiKeys.forEach(k => {
     if (k && k.trim() && !k.includes('_placeholder') && !keysToTry.includes(k.trim())) {
       keysToTry.push(k.trim());
@@ -518,34 +513,19 @@ async function verifyWithVerifyEtMultiKey(settings, transactionId, targetPhoneNu
   for (const key of keysToTry) {
     if (!key || key.includes('_placeholder')) continue;
 
-    // 1. Try with targetPhoneNumber first
-    let result = await verifyWithVerifyEt(key, transactionId, targetPhoneNumber);
+    const result = await verifyWithVerifyEt(key, transactionId);
     if (result.success && result.receipt) {
-      return result;
-    }
-
-    lastResult = result;
-
-    // 2. If mismatch/not found on target phone, try without settlementAccount
-    // to check if money was received on ANY of our 10 active phone numbers!
-    const resNoAccount = await verifyWithVerifyEt(key, transactionId, null);
-    if (resNoAccount.success && resNoAccount.receipt) {
-      const credited = resNoAccount.receipt.creditedAccount || resNoAccount.receipt.receiver;
+      const credited = result.receipt.creditedAccount || result.receipt.receiver;
       if (matchesMaskedPhone(credited, activePhones)) {
-        return resNoAccount;
-      } else {
-        return {
-          success: false,
-          message: 'Transaction was not sent to any of our active deposit phone numbers.',
-          code: 'SETTLEMENT_MISMATCH',
-        };
+        return result;
       }
     }
+    lastResult = result;
   }
 
   return lastResult || {
     success: false,
-    message: 'Transaction not found or could not be verified.',
+    message: 'Transaction not found or could not be verified on any active phone number.',
   };
 }
 
@@ -612,22 +592,6 @@ router.post('/verify', (req, res) => {
       const tIdx = currentTxs.findIndex(t => t.id === sessionId);
 
       if (tIdx !== -1) {
-        // Enforce active phone validation: Check if session's assigned phone is still active in numbers.json
-        const activePhones = getActivePhoneNumbers();
-        const assignedPhoneNorm = normalizePhone(currentTxs[tIdx].phoneNumber);
-
-        if (!activePhones.includes(assignedPhoneNorm)) {
-          currentTxs[tIdx].status = 'failed';
-          currentTxs[tIdx].failReason = 'This deposit phone number is no longer active. Please start a new deposit session.';
-          writeJSON('transactions.json', currentTxs);
-
-          if (currentTxs[tIdx].callbackUrl) {
-            const payload = createWebhookPayload(currentTxs[tIdx], 'failed', 0, {}, currentTxs[tIdx].failReason);
-            sendWebhookWithRetry(currentTxs[tIdx].callbackUrl, payload);
-          }
-          return;
-        }
-
         if (result.success && result.receipt) {
           const creditedAccountStr = result.receipt.creditedAccount || result.receipt.receiver;
           if (!matchesMaskedPhone(creditedAccountStr, activePhones)) {
