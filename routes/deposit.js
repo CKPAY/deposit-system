@@ -595,14 +595,12 @@ router.post('/verify', (req, res) => {
         if (result.success && result.receipt) {
           const creditedAccountStr = result.receipt.creditedAccount || result.receipt.receiver;
           if (!matchesMaskedPhone(creditedAccountStr, activePhones)) {
-            currentTxs[tIdx].status = 'failed';
-            currentTxs[tIdx].failReason = 'Transaction was not sent to an active deposit phone number.';
+            // Auto-reset to pending: user can retry without new session. No failed callback to Jember Bet.
+            currentTxs[tIdx].status = 'pending';
+            currentTxs[tIdx].transactionId = null;
+            currentTxs[tIdx].submittedAt = null;
+            currentTxs[tIdx].failReason = 'Transaction was not sent to an active deposit phone number. Please try again.';
             writeJSON('transactions.json', currentTxs);
-
-            if (currentTxs[tIdx].callbackUrl) {
-              const payload = createWebhookPayload(currentTxs[tIdx], 'failed', 0, {}, currentTxs[tIdx].failReason);
-              sendWebhookWithRetry(currentTxs[tIdx].callbackUrl, payload);
-            }
             return;
           }
 
@@ -613,32 +611,29 @@ router.post('/verify', (req, res) => {
           const maxDeposit = settings.maxDeposit || 50000;
 
           if (parsedAmt < minDeposit) {
-            currentTxs[tIdx].status = 'failed';
-            currentTxs[tIdx].failReason = `Verified amount (${parsedAmt.toFixed(2)} ETB) is below minimum deposit limit of ${minDeposit} ETB.`;
+            // Auto-reset to pending: user can retry. No failed callback to Jember Bet.
+            currentTxs[tIdx].status = 'pending';
+            currentTxs[tIdx].transactionId = null;
+            currentTxs[tIdx].submittedAt = null;
+            currentTxs[tIdx].failReason = `Amount (${parsedAmt.toFixed(2)} ETB) is below the minimum deposit of ${minDeposit} ETB. Please try again.`;
             writeJSON('transactions.json', currentTxs);
-
-            if (currentTxs[tIdx].callbackUrl) {
-              const payload = createWebhookPayload(currentTxs[tIdx], 'failed', 0, {}, currentTxs[tIdx].failReason);
-              sendWebhookWithRetry(currentTxs[tIdx].callbackUrl, payload);
-            }
             return;
           }
 
           if (parsedAmt > maxDeposit) {
-            currentTxs[tIdx].status = 'failed';
-            currentTxs[tIdx].failReason = `Verified amount (${parsedAmt.toFixed(2)} ETB) exceeds maximum deposit limit of ${maxDeposit} ETB.`;
+            // Auto-reset to pending: user can retry. No failed callback to Jember Bet.
+            currentTxs[tIdx].status = 'pending';
+            currentTxs[tIdx].transactionId = null;
+            currentTxs[tIdx].submittedAt = null;
+            currentTxs[tIdx].failReason = `Amount (${parsedAmt.toFixed(2)} ETB) exceeds the maximum deposit of ${maxDeposit} ETB.`;
             writeJSON('transactions.json', currentTxs);
-
-            if (currentTxs[tIdx].callbackUrl) {
-              const payload = createWebhookPayload(currentTxs[tIdx], 'failed', 0, {}, currentTxs[tIdx].failReason);
-              sendWebhookWithRetry(currentTxs[tIdx].callbackUrl, payload);
-            }
             return;
           }
 
           currentTxs[tIdx].amount = parsedAmt;
           currentTxs[tIdx].verifiedAmount = parsedAmt;
           currentTxs[tIdx].status = 'verified';
+          currentTxs[tIdx].failReason = null; // Always clear failReason on verified
           currentTxs[tIdx].receipt = result.receipt;
           writeJSON('transactions.json', currentTxs);
           try { saveTx(currentTxs[tIdx]); } catch {}
@@ -649,16 +644,14 @@ router.post('/verify', (req, res) => {
             sendWebhookWithRetry(currentTxs[tIdx].callbackUrl, payload);
           }
         } else {
-          // Verification failed on verify.et
-          currentTxs[tIdx].status = 'failed';
-          currentTxs[tIdx].failReason = result.message || 'Invalid transaction ID or receipt not found';
+          // Verification failed on verify.et — auto-reset to pending so user can retry.
+          // NO failed callback sent to Jember Bet to avoid order closure on retryable errors.
+          currentTxs[tIdx].status = 'pending';
+          currentTxs[tIdx].transactionId = null;
+          currentTxs[tIdx].submittedAt = null;
+          currentTxs[tIdx].failReason = result.message || 'Invalid transaction ID or receipt not found. Please try again.';
           writeJSON('transactions.json', currentTxs);
-          try { saveTx(currentTxs[tIdx]); } catch {}
-
-          if (currentTxs[tIdx].callbackUrl) {
-            const payload = createWebhookPayload(currentTxs[tIdx], 'failed', 0, {}, currentTxs[tIdx].failReason);
-            sendWebhookWithRetry(currentTxs[tIdx].callbackUrl, payload);
-          }
+          // Note: saveTx NOT called — failed txIds are not stored in SQLite
         }
       }
     } else {
@@ -733,7 +726,7 @@ router.post('/verify', (req, res) => {
 });
 
 router.post('/fail', (req, res) => {
-  const { sessionId, transactionId, reason } = req.body;
+  const { sessionId, reason } = req.body;
 
   if (!sessionId) {
     return res.status(400).json({ error: 'Missing sessionId' });
@@ -743,14 +736,15 @@ router.post('/fail', (req, res) => {
   const idx = transactions.findIndex(t => t.id === sessionId);
 
   if (idx !== -1) {
-    transactions[idx].status = 'failed';
-    if (transactionId) transactions[idx].transactionId = transactionId.trim();
-    transactions[idx].failReason = reason || 'Verification failed';
-    transactions[idx].submittedAt = Date.now();
+    // Reset to pending so user can retry — no failed callback sent to Jember Bet
+    transactions[idx].status = 'pending';
+    transactions[idx].transactionId = null;
+    transactions[idx].submittedAt = null;
+    transactions[idx].failReason = reason || 'Verification timed out. Please try again.';
     writeJSON('transactions.json', transactions);
   }
 
-  res.json({ success: true, status: 'failed' });
+  res.json({ success: true, status: 'pending' });
 });
 
 router.get('/status/:sessionId', (req, res) => {
@@ -789,8 +783,8 @@ router.post('/reset', (req, res) => {
     return res.status(400).json({ error: 'Session has expired' });
   }
 
-  // Only allow reset from failed or processing states
-  if (!['failed', 'processing'].includes(tx.status)) {
+  // Allow reset from pending, failed, or processing states
+  if (!['pending', 'failed', 'processing'].includes(tx.status)) {
     return res.status(400).json({ error: `Cannot reset a transaction with status: ${tx.status}` });
   }
 
