@@ -523,9 +523,9 @@ async function verifyWithVerifyEtMultiKey(settings, transactionId, targetPhoneNu
     lastResult = result;
   }
 
-  return lastResult || {
+  return {
     success: false,
-    message: 'Transaction not found or could not be verified on any active phone number.',
+    message: 'Transaction not found or could not be verified on any active phone number. Please check and try again.',
   };
 }
 
