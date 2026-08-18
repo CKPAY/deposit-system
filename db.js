@@ -113,7 +113,16 @@ function expireOldPendingTxs(userId) {
   db.prepare(`UPDATE transactions SET status = 'expired' WHERE userId = ? AND status = 'pending'`).run(String(userId));
 }
 
+function expireAllOldPendingTxs() {
+  const now = Date.now();
+  db.prepare(`UPDATE transactions SET status = 'expired' WHERE status = 'pending' AND expiresAt < ?`).run(now);
+  db.prepare(`UPDATE transactions SET status = 'failed', failReason = 'Verification timeout' WHERE status = 'processing' AND submittedAt < ?`).run(now - 30000);
+}
+
 function getAllTxs(filters = {}) {
+  // Always clean up expired sessions first so only truly active sessions show as pending
+  expireAllOldPendingTxs();
+
   let sql = `SELECT * FROM transactions`;
   const conditions = [];
   const params = [];
@@ -183,6 +192,7 @@ module.exports = {
   getTxByCleanTxId,
   getActivePendingTx,
   expireOldPendingTxs,
+  expireAllOldPendingTxs,
   getAllTxs,
   getStats,
 };
