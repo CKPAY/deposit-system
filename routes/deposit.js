@@ -124,18 +124,44 @@ function extractTransactionId(text) {
   const str = String(text).trim();
   if (!str) return null;
 
-  const matchTxNum = str.match(/transaction\s+number\s+is\s+([A-Za-z0-9]{8,20})/i);
-  if (matchTxNum && matchTxNum[1]) return matchTxNum[1].trim().toUpperCase();
-
-  const matchReceipt = str.match(/receipt\/([A-Za-z0-9]{8,20})/i);
-  if (matchReceipt && matchReceipt[1]) return matchReceipt[1].trim().toUpperCase();
-
-  const matchTxId = str.match(/(?:transaction\s*id|txid|txn|ref)\s*[:=]?\s*([A-Za-z0-9]{8,20})/i);
-  if (matchTxId && matchTxId[1]) return matchTxId[1].trim().toUpperCase();
-
+  // 1. Direct 8-20 char alphanumeric code (single token)
   if (!/\s/.test(str)) {
     const isAlphanumericCode = /^[A-Za-z0-9]{8,20}$/.test(str);
     if (isAlphanumericCode) return str.toUpperCase();
+  }
+
+  // 2. Receipt URL format: receipt/DHH3VDJ5SH or receipt?id=DHH3VDJ5SH
+  const matchReceipt = str.match(/receipt[/=]([A-Za-z0-9]{8,20})/i);
+  if (matchReceipt && matchReceipt[1]) return matchReceipt[1].trim().toUpperCase();
+
+  // 3. Multilingual keywords for Ethiopian Languages & English:
+  // - Amharic (አማርኛ): የግብይት ቁጥር, የግብይት መለያ, የግብይት ቁጥርዎ, መለያ ቁጥር, የደረሰኝ ቁጥር
+  // - Afaan Oromoo: lakkoofsa daldalaa, lakk. daldalaa, lakk. dabarsaa, lakkoofsa nagahee, lakk. ajajaa
+  // - Tigrinya (ትግርኛ): ቁጽሪ ንግዲ, ናይ ንግዲ ቁጽሪ, ቁጽሪ ትራንዛክሽን, ቁጽሪ ደረሰኝ
+  // - Somali (Af Soomaali): lambarka macaamilka, lambarka rasiidka, lambarka tixraaca
+  // - English: transaction number is, transaction id, txn, txid, ref, reference
+  const matchKeyword = str.match(
+    /(?:transaction\s+(?:number\s+is|id|number|no|code)|txn|txid|ref(?:erence)?|receipt|የግብይት\s*(?:ቁጥር(?:ዎ)?|መለያ)?|መለያ\s*ቁጥር|የደረሰኝ\s*ቁጥር|lakk(?:oofsa)?\.?\s*(?:daldala(?:a| keessanii)?|dabarsaa|nagahee|ajajaa)?|ቁጽሪ\s*(?:ንግዲ(?:ኹም)?|ትራንዛክሽን|ደረሰኝ)?|lambarka\s*(?:macaamilka|rasiidka|tixraaca)?)\s*[:፡=]?\s*([A-Za-z0-9]{8,20})/iu
+  );
+  if (matchKeyword && matchKeyword[1]) return matchKeyword[1].trim().toUpperCase();
+
+  // 4. Standard 10-character Telebirr code pattern anywhere in text (e.g. DHH3VDJ5SH, DES8F3QMFM, DHI0VE7AGW)
+  const matchTelebirrCode = str.match(/\b(D[A-Za-z0-9]{9})\b/i);
+  if (matchTelebirrCode && matchTelebirrCode[1]) return matchTelebirrCode[1].trim().toUpperCase();
+
+  // 5. Any standalone 8-16 alphanumeric word with mixed letters/numbers
+  const words = str.split(/[\s,;:፡.\r\n\t]+/);
+  for (const w of words) {
+    const clean = w.replace(/[^A-Za-z0-9]/g, '');
+    if (clean.length >= 8 && clean.length <= 16 && /[A-Za-z]/.test(clean) && /[0-9]/.test(clean)) {
+      return clean.toUpperCase();
+    }
+  }
+
+  // 6. Generic first word fallback if valid alphanumeric
+  const firstWord = words[0]?.replace(/[^A-Za-z0-9]/g, '');
+  if (firstWord && firstWord.length >= 8 && firstWord.length <= 20) {
+    return firstWord.toUpperCase();
   }
 
   return str.split(/\s+/)[0].toUpperCase();
