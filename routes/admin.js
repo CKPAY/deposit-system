@@ -243,18 +243,25 @@ router.get('/transactions', (req, res) => {
 function getPlatformNumbersData(platform = 'jember') {
   const p = String(platform || 'jember').toLowerCase();
   const data = readJSON('numbers.json') || {};
+  let list = [];
   if (data[p] && Array.isArray(data[p].numbers)) {
-    return data[p].numbers;
+    list = data[p].numbers;
+  } else if (Array.isArray(data.numbers) && p === 'jember') {
+    list = data.numbers;
   }
-  if (Array.isArray(data.numbers) && p === 'jember') {
-    return data.numbers;
+
+  // Always return exactly 20 slots, preserving any existing configured numbers
+  const result = [];
+  for (let i = 1; i <= 20; i++) {
+    const found = list.find(n => n.id === i);
+    result.push({
+      id: i,
+      phone: found?.phone || '',
+      label: `Account ${i}`,
+      activeUsers: found?.activeUsers || 0
+    });
   }
-  return Array.from({ length: 20 }, (_, i) => ({
-    id: i + 1,
-    phone: '',
-    label: `Account ${i + 1}`,
-    activeUsers: 0
-  }));
+  return result;
 }
 
 router.get('/numbers', (req, res) => {
