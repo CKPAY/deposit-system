@@ -175,6 +175,12 @@ function updateExpiredTransactions() {
   return newList;
 }
 
+function getTxAmount(t) {
+  const v = (t.verifiedAmount !== null && t.verifiedAmount !== undefined && t.verifiedAmount !== '') ? t.verifiedAmount : t.amount;
+  const num = parseFloat(String(v).replace(/[^0-9.]/g, ''));
+  return isNaN(num) ? 0 : num;
+}
+
 function getEthiopianTimeMidnightTimestamps() {
   const now = Date.now();
   const ETHIOPIA_OFFSET_MS = 3 * 60 * 60 * 1000;
@@ -184,13 +190,13 @@ function getEthiopianTimeMidnightTimestamps() {
   const month = eatDate.getUTCMonth();
   const day = eatDate.getUTCDate();
 
-  // Today start at 00:00:00 GMT+3 (Ethiopian Time)
+  // Today start at 00:00:00 GMT+3 (Midnight in Ethiopia)
   const todayStartUTC = Date.UTC(year, month, day) - ETHIOPIA_OFFSET_MS;
 
-  // Last 7 days in GMT+3
+  // Last 7 days in GMT+3 (Rolling 7 days from today midnight)
   const weekStartUTC = todayStartUTC - (6 * 24 * 60 * 60 * 1000);
 
-  // Month start: 1st of month at 00:00:00 GMT+3
+  // Month start: 1st of month at 00:00:00 GMT+3 (1st of month midnight in Ethiopia)
   const monthStartUTC = Date.UTC(year, month, 1) - ETHIOPIA_OFFSET_MS;
 
   return { todayStart: todayStartUTC, weekStart: weekStartUTC, monthStart: monthStartUTC };
@@ -205,6 +211,11 @@ router.get('/stats', (req, res) => {
   const week   = transactions.filter(t => t.createdAt >= weekStart);
   const month  = transactions.filter(t => t.createdAt >= monthStart);
 
+  const verifiedAll = transactions.filter(t => t.status === 'verified');
+  const verifiedToday = today.filter(t => t.status === 'verified');
+  const verifiedWeek = week.filter(t => t.status === 'verified');
+  const verifiedMonth = month.filter(t => t.status === 'verified');
+
   res.json({
     platform,
     total: transactions.length,
@@ -213,13 +224,13 @@ router.get('/stats', (req, res) => {
     monthCount: month.length,
     pending:    transactions.filter(t => t.status === 'pending').length,
     processing: transactions.filter(t => t.status === 'processing').length,
-    verified:   transactions.filter(t => t.status === 'verified').length,
+    verified:   verifiedAll.length,
     failed:     transactions.filter(t => t.status === 'failed').length,
     expired:    transactions.filter(t => t.status === 'expired').length,
-    totalETB: transactions.filter(t => t.status === 'verified').reduce((s, t) => s + (t.verifiedAmount || t.amount), 0),
-    todayETB: today.filter(t => t.status === 'verified').reduce((s, t) => s + (t.verifiedAmount || t.amount), 0),
-    weekETB:  week.filter(t => t.status === 'verified').reduce((s, t) => s + (t.verifiedAmount || t.amount), 0),
-    monthETB: month.filter(t => t.status === 'verified').reduce((s, t) => s + (t.verifiedAmount || t.amount), 0),
+    totalETB: verifiedAll.reduce((s, t) => s + getTxAmount(t), 0),
+    todayETB: verifiedToday.reduce((s, t) => s + getTxAmount(t), 0),
+    weekETB:  verifiedWeek.reduce((s, t) => s + getTxAmount(t), 0),
+    monthETB: verifiedMonth.reduce((s, t) => s + getTxAmount(t), 0),
   });
 });
 
@@ -269,7 +280,6 @@ router.put('/numbers', (req, res) => {
     return res.status(400).json({ error: 'Exactly 20 numbers required' });
   }
 
-  const p = String(platform).toLowerCase();
   const fullNumbersData = readJSON('numbers.json') || {};
   const oldNumbers = getPlatformNumbersData(p);
 
