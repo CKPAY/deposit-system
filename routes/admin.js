@@ -250,10 +250,19 @@ router.get('/numbers', (req, res) => {
 
 router.put('/numbers', (req, res) => {
   const platform = req.body.platform || req.query.platform || 'jember';
-  const { numbers } = req.body;
-  if (!Array.isArray(numbers) || numbers.length !== 20) {
-    return res.status(400).json({ error: 'Exactly 20 numbers required' });
+  const p = String(platform).toLowerCase();
+  let { numbers } = req.body;
+  if (!Array.isArray(numbers) || numbers.length === 0) {
+    return res.status(400).json({ error: 'Numbers array is required' });
   }
+
+  // Pad to exactly 20 slots — so saving works even if server had 10 or any count
+  const padded = [];
+  for (let i = 1; i <= 20; i++) {
+    const found = numbers.find(n => n.id === i);
+    padded.push(found || { id: i, phone: '', label: `Account ${i}`, activeUsers: 0 });
+  }
+  numbers = padded;
 
   const fullNumbersData = readJSON('numbers.json') || {};
   const oldNumbers = getPlatformNumbersData(p);
