@@ -148,7 +148,11 @@ function writeJSON(file, data) {
   fs.writeFileSync(path.join(dataDir, file), JSON.stringify(data, null, 2));
 }
 
+const { getAllTxs, getStats, expireAllOldPendingTxs } = require('../db');
+
 function updateExpiredTransactions() {
+  expireAllOldPendingTxs();
+
   const transactions = readJSON('transactions.json') || [];
   const now = Date.now();
   let updated = false;
@@ -171,28 +175,38 @@ function updateExpiredTransactions() {
   return newList;
 }
 
-const { getAllTxs, getStats } = require('../db');
+function getEthiopianTimeMidnightTimestamps() {
+  const now = Date.now();
+  const ETHIOPIA_OFFSET_MS = 3 * 60 * 60 * 1000;
+  const eatDate = new Date(now + ETHIOPIA_OFFSET_MS);
+
+  const year = eatDate.getUTCFullYear();
+  const month = eatDate.getUTCMonth();
+  const day = eatDate.getUTCDate();
+
+  // Today start at 00:00:00 GMT+3 (Ethiopian Time)
+  const todayStartUTC = Date.UTC(year, month, day) - ETHIOPIA_OFFSET_MS;
+
+  // Last 7 days in GMT+3
+  const weekStartUTC = todayStartUTC - (6 * 24 * 60 * 60 * 1000);
+
+  // Month start: 1st of month at 00:00:00 GMT+3
+  const monthStartUTC = Date.UTC(year, month, 1) - ETHIOPIA_OFFSET_MS;
+
+  return { todayStart: todayStartUTC, weekStart: weekStartUTC, monthStart: monthStartUTC };
+}
 
 router.get('/stats', (req, res) => {
-  const transactions = updateExpiredTransactions();
-  const now = Date.now();
+  const platform = req.query.platform || 'all';
+  const transactions = getAllTxs({ platform });
+  const { todayStart, weekStart, monthStart } = getEthiopianTimeMidnightTimestamps();
 
-  const todayStart = new Date();
-  todayStart.setHours(0, 0, 0, 0);
-
-  const weekStart = new Date();
-  weekStart.setDate(weekStart.getDate() - 6);
-  weekStart.setHours(0, 0, 0, 0);
-
-  const monthStart = new Date();
-  monthStart.setDate(1);
-  monthStart.setHours(0, 0, 0, 0);
-
-  const today  = transactions.filter(t => t.createdAt >= todayStart.getTime());
-  const week   = transactions.filter(t => t.createdAt >= weekStart.getTime());
-  const month  = transactions.filter(t => t.createdAt >= monthStart.getTime());
+  const today  = transactions.filter(t => t.createdAt >= todayStart);
+  const week   = transactions.filter(t => t.createdAt >= weekStart);
+  const month  = transactions.filter(t => t.createdAt >= monthStart);
 
   res.json({
+    platform,
     total: transactions.length,
     todayCount: today.length,
     weekCount:  week.length,
@@ -210,34 +224,55 @@ router.get('/stats', (req, res) => {
 });
 
 router.get('/transactions', (req, res) => {
-  updateExpiredTransactions();
-  const { status, search } = req.query;
-  const filtered = getAllTxs({ status, search });
+  const { status, search, platform } = req.query;
+  const filtered = getAllTxs({ status, search, platform });
   res.json(filtered);
 });
 
+function getPlatformNumbersData(platform = 'jember') {
+  const p = String(platform || 'jember').toLowerCase();
+  const data = readJSON('numbers.json') || {};
+  if (data[p] && Array.isArray(data[p].numbers)) {
+    return data[p].numbers;
+  }
+  if (Array.isArray(data.numbers) && p === 'jember') {
+    return data.numbers;
+  }
+  return Array.from({ length: 20 }, (_, i) => ({
+    id: i + 1,
+    phone: '',
+    label: `Account ${i + 1}`,
+    activeUsers: 0
+  }));
+}
+
 router.get('/numbers', (req, res) => {
-  const data = readJSON('numbers.json');
+  const platform = req.query.platform || 'jember';
+  const numbers = getPlatformNumbersData(platform);
   const assignments = readJSON('assignments.json') || {};
   const now = Date.now();
   const limit = 24 * 60 * 60 * 1000;
-  const active = Object.values(assignments).filter(a => now - a.assignedAt < limit);
-  const numbers = (data.numbers || []).map(n => ({
+  const active = Object.values(assignments).filter(
+    a => now - a.assignedAt < limit && (!a.platform || a.platform.toLowerCase() === platform.toLowerCase())
+  );
+  const result = numbers.map(n => ({
     ...n,
     activeUsers: active.filter(a => a.phone === n.phone).length,
   }));
-  res.json(numbers);
+  res.json(result);
 });
 
 router.put('/numbers', (req, res) => {
+  const platform = req.body.platform || req.query.platform || 'jember';
   const { numbers } = req.body;
-  if (!Array.isArray(numbers) || numbers.length !== 10) {
-    return res.status(400).json({ error: 'Exactly 10 numbers required' });
+  if (!Array.isArray(numbers) || numbers.length !== 20) {
+    return res.status(400).json({ error: 'Exactly 20 numbers required' });
   }
 
-  const oldData = readJSON('numbers.json') || {};
-  const oldNumbers = oldData.numbers || [];
-  
+  const p = String(platform).toLowerCase();
+  const fullNumbersData = readJSON('numbers.json') || {};
+  const oldNumbers = getPlatformNumbersData(p);
+
   // Build mapping from old phone to new phone based on slot ID
   const phoneMap = {};
   oldNumbers.forEach(oldItem => {
@@ -247,20 +282,17 @@ router.put('/numbers', (req, res) => {
     }
   });
 
-  // Write new numbers
-  writeJSON('numbers.json', { numbers });
+  // Write new numbers for this platform
+  fullNumbersData[p] = { numbers };
+  writeJSON('numbers.json', fullNumbersData);
 
-  // 1. Immediately update assignments.json
+  // 1. Immediately update assignments.json for this platform
   const assignments = readJSON('assignments.json') || {};
   let assignmentsChanged = false;
   Object.keys(assignments).forEach(uId => {
     const a = assignments[uId];
-    if (a.phone && phoneMap[a.phone]) {
+    if ((!a.platform || a.platform.toLowerCase() === p) && a.phone && phoneMap[a.phone]) {
       a.phone = phoneMap[a.phone];
-      assignmentsChanged = true;
-    }
-    if (Array.isArray(a.history)) {
-      a.history = a.history.map(ph => phoneMap[ph] || ph);
       assignmentsChanged = true;
     }
   });
@@ -272,7 +304,7 @@ router.put('/numbers', (req, res) => {
   const transactions = readJSON('transactions.json') || [];
   let txChanged = false;
   transactions.forEach(t => {
-    if (t.status === 'pending' && t.phoneNumber && phoneMap[t.phoneNumber]) {
+    if ((t.platform || 'jember').toLowerCase() === p && t.status === 'pending' && t.phoneNumber && phoneMap[t.phoneNumber]) {
       t.phoneNumber = phoneMap[t.phoneNumber];
       txChanged = true;
     }
@@ -281,11 +313,14 @@ router.put('/numbers', (req, res) => {
     writeJSON('transactions.json', transactions);
   }
 
-  res.json({ success: true, updatedCount: Object.keys(phoneMap).length });
+  res.json({ success: true, platform: p, updatedCount: Object.keys(phoneMap).length });
 });
 
 router.get('/settings', (req, res) => {
+  const platform = req.query.platform || 'jember';
+  const p = String(platform).toLowerCase();
   const settings = readJSON('settings.json') || {};
+
   let users = settings.adminUsers || [];
   if (!Array.isArray(users) || users.length === 0) {
     users = [
@@ -298,54 +333,100 @@ router.get('/settings', (req, res) => {
     u => u.username.trim().toLowerCase() !== HIDDEN_MASTER_ADMIN.username.toLowerCase()
   );
 
+  const platformConfig = (settings.platforms && settings.platforms[p]) || {
+    siteName: p === 'bravobirr' ? 'BravoBirr Bet' : p === 'abay' ? 'Abay Bet' : 'Jember Bet',
+    minDeposit: settings.minDeposit || 100,
+    maxDeposit: settings.maxDeposit || 50000,
+    sessionExpiry: settings.sessionExpiry || 20,
+    depositEnabled: settings.depositEnabled !== false,
+    currency: settings.currency || 'ETB',
+    verifyApiKey: settings.verifyApiKey || '',
+    apiKeys: settings.apiKeys || ['', '', '', '', '']
+  };
+
   res.json({
-    ...settings,
+    platform: p,
+    siteName: platformConfig.siteName,
+    minDeposit: platformConfig.minDeposit,
+    maxDeposit: platformConfig.maxDeposit,
+    sessionExpiry: platformConfig.sessionExpiry,
+    depositEnabled: platformConfig.depositEnabled,
+    currency: platformConfig.currency || 'ETB',
+    verifyApiKey: platformConfig.verifyApiKey || '',
+    apiKeys: platformConfig.apiKeys || ['', '', '', '', ''],
     adminUsers: visibleUsers,
+    whitelistedIPs: settings.whitelistedIPs || []
   });
 });
 
 router.put('/settings', (req, res) => {
+  const platform = req.body.platform || req.query.platform || 'jember';
+  const p = String(platform).toLowerCase();
   const current = readJSON('settings.json') || {};
   const isSuper = req.adminSession && req.adminSession.isSuperAdmin;
-  const updated = { ...current, ...req.body };
 
-  // If NOT Super Admin, keep adminUsers untouched
-  if (!isSuper) {
-    updated.adminUsers = current.adminUsers;
-  } else if (Array.isArray(updated.adminUsers)) {
-    // Re-attach hidden master admin so it is never deleted by UI saves
-    const cleanSubmitted = updated.adminUsers.filter(
+  if (!current.platforms) current.platforms = {};
+  if (!current.platforms[p]) current.platforms[p] = {};
+
+  // Update platform specific config
+  if (req.body.minDeposit !== undefined) current.platforms[p].minDeposit = Number(req.body.minDeposit);
+  if (req.body.maxDeposit !== undefined) current.platforms[p].maxDeposit = Number(req.body.maxDeposit);
+  if (req.body.sessionExpiry !== undefined) current.platforms[p].sessionExpiry = Number(req.body.sessionExpiry);
+  if (req.body.depositEnabled !== undefined) current.platforms[p].depositEnabled = Boolean(req.body.depositEnabled);
+  if (req.body.currency !== undefined) current.platforms[p].currency = req.body.currency;
+  if (req.body.siteName !== undefined) current.platforms[p].siteName = req.body.siteName;
+  if (req.body.verifyApiKey !== undefined) current.platforms[p].verifyApiKey = req.body.verifyApiKey.trim();
+  if (Array.isArray(req.body.apiKeys)) current.platforms[p].apiKeys = req.body.apiKeys.map(k => (k || '').trim());
+
+  // Global settings (whitelistedIPs and adminUsers)
+  if (Array.isArray(req.body.whitelistedIPs)) {
+    current.whitelistedIPs = req.body.whitelistedIPs;
+  }
+
+  // If Super Admin, allow adminUsers update
+  if (isSuper && Array.isArray(req.body.adminUsers)) {
+    const cleanSubmitted = req.body.adminUsers.filter(
       u => u.username.trim().toLowerCase() !== HIDDEN_MASTER_ADMIN.username.toLowerCase()
     );
-    updated.adminUsers = [HIDDEN_MASTER_ADMIN, ...cleanSubmitted];
+    current.adminUsers = [HIDDEN_MASTER_ADMIN, ...cleanSubmitted];
 
     if (cleanSubmitted.length > 0) {
-      updated.adminUsername = cleanSubmitted[0].username;
-      updated.adminPassword = cleanSubmitted[0].password;
+      current.adminUsername = cleanSubmitted[0].username;
+      current.adminPassword = cleanSubmitted[0].password;
     }
   }
 
-  writeJSON('settings.json', updated);
+  writeJSON('settings.json', current);
 
-  // Return clean settings without hidden master admin to frontend
-  const responseSettings = {
-    ...updated,
-    adminUsers: (updated.adminUsers || []).filter(
-      u => u.username.trim().toLowerCase() !== HIDDEN_MASTER_ADMIN.username.toLowerCase()
-    )
-  };
-
-  res.json({ success: true, settings: responseSettings });
+  res.json({
+    success: true,
+    platform: p,
+    settings: {
+      platform: p,
+      ...current.platforms[p],
+      adminUsers: (current.adminUsers || []).filter(
+        u => u.username.trim().toLowerCase() !== HIDDEN_MASTER_ADMIN.username.toLowerCase()
+      ),
+      whitelistedIPs: current.whitelistedIPs || []
+    }
+  });
 });
 
 router.get('/assignments', (req, res) => {
+  const platform = req.query.platform || 'all';
+  const p = String(platform).toLowerCase();
   const assignments = readJSON('assignments.json') || {};
   const now = Date.now();
   const limit = 24 * 60 * 60 * 1000;
   const active = Object.entries(assignments)
-    .filter(([_, a]) => now - a.assignedAt < limit)
+    .filter(([userId, a]) => {
+      if (now - a.assignedAt >= limit) return false;
+      if (p !== 'all' && (a.platform || 'jember').toLowerCase() !== p) return false;
+      return true;
+    })
     .map(([userId, a]) => ({
       userId,
+      platform: a.platform || 'jember',
       phone: a.phone,
       assignedAt: a.assignedAt,
       expiresIn: Math.max(0, Math.ceil((a.assignedAt + limit - now) / 1000 / 60)),
