@@ -171,26 +171,54 @@ function getAllTxs(filters = {}) {
   }));
 }
 
-function getStats(platform = 'all') {
+function getStats(platform = 'all', timestamps = {}) {
   let whereClause = '';
   const params = [];
 
   if (platform && platform !== 'all') {
-    whereClause = ` WHERE platform = ?`;
+    whereClause = ' WHERE platform = ?';
     params.push(String(platform).toLowerCase());
   }
 
-  const total = db.prepare(`SELECT COUNT(*) as cnt FROM transactions${whereClause}`).get(...params).cnt;
-  const verified = db.prepare(`SELECT COUNT(*) as cnt, SUM(verifiedAmount) as totalAmount FROM transactions WHERE status = 'verified'${whereClause ? ' AND platform = ?' : ''}`).get(...params);
-  const pending = db.prepare(`SELECT COUNT(*) as cnt FROM transactions WHERE status = 'pending'${whereClause ? ' AND platform = ?' : ''}`).get(...params).cnt;
-  const failed = db.prepare(`SELECT COUNT(*) as cnt FROM transactions WHERE status = 'failed'${whereClause ? ' AND platform = ?' : ''}`).get(...params).cnt;
+  const todayStart = Number(timestamps.todayStart) || 0;
+  const weekStart = Number(timestamps.weekStart) || 0;
+  const monthStart = Number(timestamps.monthStart) || 0;
+
+  const sql = `
+    SELECT 
+      COUNT(*) as total,
+      SUM(CASE WHEN status = 'verified' THEN COALESCE(verifiedAmount, amount, 0) ELSE 0 END) as totalETB,
+      SUM(CASE WHEN status = 'verified' AND createdAt >= ${todayStart} THEN COALESCE(verifiedAmount, amount, 0) ELSE 0 END) as todayETB,
+      SUM(CASE WHEN status = 'verified' AND createdAt >= ${weekStart} THEN COALESCE(verifiedAmount, amount, 0) ELSE 0 END) as weekETB,
+      SUM(CASE WHEN status = 'verified' AND createdAt >= ${monthStart} THEN COALESCE(verifiedAmount, amount, 0) ELSE 0 END) as monthETB,
+      COUNT(CASE WHEN status = 'verified' THEN 1 END) as verified,
+      COUNT(CASE WHEN status = 'verified' AND createdAt >= ${todayStart} THEN 1 END) as todayCount,
+      COUNT(CASE WHEN status = 'verified' AND createdAt >= ${weekStart} THEN 1 END) as weekCount,
+      COUNT(CASE WHEN status = 'verified' AND createdAt >= ${monthStart} THEN 1 END) as monthCount,
+      COUNT(CASE WHEN status = 'pending' THEN 1 END) as pending,
+      COUNT(CASE WHEN status = 'processing' THEN 1 END) as processing,
+      COUNT(CASE WHEN status = 'failed' THEN 1 END) as failed,
+      COUNT(CASE WHEN status = 'expired' THEN 1 END) as expired
+    FROM transactions${whereClause}
+  `;
+
+  const row = db.prepare(sql).get(...params) || {};
 
   return {
-    totalTransactions: total,
-    verifiedCount: verified.cnt,
-    verifiedVolume: verified.totalAmount || 0,
-    pendingCount: pending,
-    failedCount: failed,
+    platform,
+    total: row.total || 0,
+    todayCount: row.todayCount || 0,
+    weekCount: row.weekCount || 0,
+    monthCount: row.monthCount || 0,
+    pending: row.pending || 0,
+    processing: row.processing || 0,
+    verified: row.verified || 0,
+    failed: row.failed || 0,
+    expired: row.expired || 0,
+    totalETB: row.totalETB || 0,
+    todayETB: row.todayETB || 0,
+    weekETB: row.weekETB || 0,
+    monthETB: row.monthETB || 0,
   };
 }
 
