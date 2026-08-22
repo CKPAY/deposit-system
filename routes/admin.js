@@ -204,34 +204,9 @@ function getEthiopianTimeMidnightTimestamps() {
 
 router.get('/stats', (req, res) => {
   const platform = req.query.platform || 'all';
-  const transactions = getAllTxs({ platform });
-  const { todayStart, weekStart, monthStart } = getEthiopianTimeMidnightTimestamps();
-
-  const today  = transactions.filter(t => t.createdAt >= todayStart);
-  const week   = transactions.filter(t => t.createdAt >= weekStart);
-  const month  = transactions.filter(t => t.createdAt >= monthStart);
-
-  const verifiedAll = transactions.filter(t => t.status === 'verified');
-  const verifiedToday = today.filter(t => t.status === 'verified');
-  const verifiedWeek = week.filter(t => t.status === 'verified');
-  const verifiedMonth = month.filter(t => t.status === 'verified');
-
-  res.json({
-    platform,
-    total: transactions.length,
-    todayCount: today.length,
-    weekCount:  week.length,
-    monthCount: month.length,
-    pending:    transactions.filter(t => t.status === 'pending').length,
-    processing: transactions.filter(t => t.status === 'processing').length,
-    verified:   verifiedAll.length,
-    failed:     transactions.filter(t => t.status === 'failed').length,
-    expired:    transactions.filter(t => t.status === 'expired').length,
-    totalETB: verifiedAll.reduce((s, t) => s + getTxAmount(t), 0),
-    todayETB: verifiedToday.reduce((s, t) => s + getTxAmount(t), 0),
-    weekETB:  verifiedWeek.reduce((s, t) => s + getTxAmount(t), 0),
-    monthETB: verifiedMonth.reduce((s, t) => s + getTxAmount(t), 0),
-  });
+  const timestamps = getEthiopianTimeMidnightTimestamps();
+  const stats = getStats(platform, timestamps);
+  res.json(stats);
 });
 
 router.get('/transactions', (req, res) => {
@@ -243,25 +218,18 @@ router.get('/transactions', (req, res) => {
 function getPlatformNumbersData(platform = 'jember') {
   const p = String(platform || 'jember').toLowerCase();
   const data = readJSON('numbers.json') || {};
-  let list = [];
   if (data[p] && Array.isArray(data[p].numbers)) {
-    list = data[p].numbers;
-  } else if (Array.isArray(data.numbers) && p === 'jember') {
-    list = data.numbers;
+    return data[p].numbers;
   }
-
-  // Always return exactly 20 slots, preserving any existing configured numbers
-  const result = [];
-  for (let i = 1; i <= 20; i++) {
-    const found = list.find(n => n.id === i);
-    result.push({
-      id: i,
-      phone: found?.phone || '',
-      label: `Account ${i}`,
-      activeUsers: found?.activeUsers || 0
-    });
+  if (Array.isArray(data.numbers) && p === 'jember') {
+    return data.numbers;
   }
-  return result;
+  return Array.from({ length: 20 }, (_, i) => ({
+    id: i + 1,
+    phone: '',
+    label: `Account ${i + 1}`,
+    activeUsers: 0
+  }));
 }
 
 router.get('/numbers', (req, res) => {
