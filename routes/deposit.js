@@ -95,10 +95,65 @@ function normalizePhone(p) {
   return str;
 }
 
-function getActivePhoneNumbers() {
-  const numbersData = readJSON('numbers.json') || {};
-  const list = numbersData.numbers || [];
-  return list.filter(n => n.active !== false).map(n => normalizePhone(n.phone));
+function detectPlatform(req, tokenPayload = {}) {
+  const explicit = req.body?.platform || req.query?.platform || tokenPayload?.platform;
+  if (explicit && ['jember', 'bravobirr', 'abay'].includes(String(explicit).toLowerCase())) {
+    return String(explicit).toLowerCase();
+  }
+  const returnUrl = req.body?.returnUrl || req.body?.return_url || tokenPayload?.returnUrl || tokenPayload?.return_url || '';
+  const callbackUrl = req.body?.callbackUrl || req.body?.callback_url || tokenPayload?.callbackUrl || tokenPayload?.callback_url || '';
+  const referer = req.headers?.['referer'] || req.headers?.['origin'] || '';
+  const combined = `${returnUrl} ${callbackUrl} ${referer}`.toLowerCase();
+
+  if (combined.includes('bravobirr')) return 'bravobirr';
+  if (combined.includes('abaybet') || combined.includes('abay.bet') || combined.includes('abay')) return 'abay';
+  return 'jember';
+}
+
+function getPlatformSettings(platform = 'jember') {
+  const p = String(platform || 'jember').toLowerCase();
+  const raw = readJSON('settings.json') || {};
+  if (raw.platforms && raw.platforms[p]) {
+    return {
+      ...raw.platforms[p],
+      adminUsers: raw.adminUsers || [],
+      whitelistedIPs: raw.whitelistedIPs || []
+    };
+  }
+  return {
+    siteName: p === 'bravobirr' ? 'BravoBirr Bet' : p === 'abay' ? 'Abay Bet' : 'Jember Bet',
+    minDeposit: raw.minDeposit || 100,
+    maxDeposit: raw.maxDeposit || 50000,
+    sessionExpiry: raw.sessionExpiry || 20,
+    depositEnabled: raw.depositEnabled !== false,
+    currency: raw.currency || 'ETB',
+    verifyApiKey: raw.verifyApiKey || '',
+    apiKeys: raw.apiKeys || ['', '', '', '', ''],
+    adminUsers: raw.adminUsers || [],
+    whitelistedIPs: raw.whitelistedIPs || []
+  };
+}
+
+function getPlatformNumbers(platform = 'jember') {
+  const p = String(platform || 'jember').toLowerCase();
+  const raw = readJSON('numbers.json') || {};
+  if (raw[p] && Array.isArray(raw[p].numbers)) {
+    return raw[p].numbers;
+  }
+  if (Array.isArray(raw.numbers) && p === 'jember') {
+    return raw.numbers;
+  }
+  return Array.from({ length: 20 }, (_, i) => ({
+    id: i + 1,
+    phone: '',
+    label: `Account ${i + 1}`,
+    activeUsers: 0
+  }));
+}
+
+function getActivePhoneNumbers(platform = 'jember') {
+  const list = getPlatformNumbers(platform);
+  return list.filter(n => n.active !== false && n.phone && n.phone.trim()).map(n => normalizePhone(n.phone));
 }
 
 function matchesMaskedPhone(creditedStr, activePhones) {
@@ -176,8 +231,8 @@ function getActiveAssignments(assignmentsData) {
 }
 
 function pickPhoneNumber(numbers, activeAssignments, userHistory = []) {
-  const available = numbers.filter(n => n.active !== false);
-  if (available.length === 0) return numbers[0].phone;
+  const available = numbers.filter(n => n.active !== false && n.phone && n.phone.trim());
+  if (available.length === 0) return numbers[0]?.phone || '';
 
   // Filter out any numbers already assigned to this user in the current 10-day cycle
   let candidates = available.filter(n => !userHistory.includes(n.phone));
@@ -238,31 +293,34 @@ router.post('/test-callback', (req, res) => {
 });
 
 router.post('/init', (req, res) => {
-  // Verify JWT token signature if token is provided
+  let tokenPayload = {};
   const rawToken = req.body.token || req.headers['x-ckpay-token'] || null;
   if (rawToken) {
     try {
-      jwt.verify(rawToken, JWT_SECRET);
+      tokenPayload = jwt.verify(rawToken, JWT_SECRET);
     } catch (err) {
+      try { tokenPayload = jwt.decode(rawToken) || {}; } catch {}
       return res.status(401).json({ error: 'Invalid or expired payment token. Please start a new deposit session.' });
     }
   }
 
-  // Support both CK-PAY and A-Pay standard parameter names
-  const userId = req.body.userId || req.body.account_id || req.body.client_id;
-  const amount = req.body.amount;
-  const orderId = req.body.orderId || req.body.order_id || req.body.merchant_order_id || null;
-  const returnUrl = req.body.returnUrl || req.body.return_url || req.body.success_url || null;
-  const callbackUrl = req.body.callbackUrl || req.body.callback_url || req.body.postback_url || null;
+  const platform = detectPlatform(req, tokenPayload);
+  const settings = getPlatformSettings(platform);
+
+  // Support both CK-PAY and standard parameter names
+  const userId = req.body.userId || req.body.account_id || req.body.client_id || tokenPayload.userId || tokenPayload.account_id;
+  const amount = req.body.amount || tokenPayload.amount;
+  const orderId = req.body.orderId || req.body.order_id || req.body.merchant_order_id || tokenPayload.order_id || tokenPayload.orderId || null;
+  const returnUrl = req.body.returnUrl || req.body.return_url || req.body.success_url || tokenPayload.returnUrl || tokenPayload.return_url || null;
+  const callbackUrl = req.body.callbackUrl || req.body.callback_url || req.body.postback_url || tokenPayload.callbackUrl || tokenPayload.callback_url || null;
   const forceNew = req.body.forceNew;
 
   if (!userId || !amount) {
     return res.status(400).json({ error: 'Missing userId (or account_id) or amount' });
   }
 
-  const settings = readJSON('settings.json');
   if (!settings.depositEnabled) {
-    return res.status(403).json({ error: 'Deposits are currently disabled' });
+    return res.status(403).json({ error: `Deposits are currently disabled for ${settings.siteName}` });
   }
 
   const amt = Number(amount);
@@ -270,10 +328,10 @@ router.post('/init', (req, res) => {
     return res.status(400).json({ error: `Amount must be between ${settings.minDeposit} and ${settings.maxDeposit} ETB` });
   }
 
-  const numbersData = readJSON('numbers.json');
-  const numbers = numbersData.numbers || [];
-  if (numbers.length === 0) {
-    return res.status(500).json({ error: 'No phone numbers configured' });
+  const numbers = getPlatformNumbers(platform);
+  const activeNumberList = numbers.filter(n => n.phone && n.phone.trim() && n.active !== false);
+  if (activeNumberList.length === 0) {
+    return res.status(500).json({ error: `No active phone numbers configured for ${settings.siteName}` });
   }
 
   let assignmentsData = readJSON('assignments.json') || {};
@@ -281,14 +339,17 @@ router.post('/init', (req, res) => {
   const transactions = readJSON('transactions.json') || [];
   const now = Date.now();
 
+  const userKey = `${platform}:${userId}`;
+
   // Re-use active pending session on refresh ONLY if forceNew is not requested and amount matches
   if (!forceNew) {
     const activeSession = transactions.find(
-      t => t.userId === String(userId) && t.status === 'pending' && t.expiresAt > now && Number(t.amount) === amt
+      t => t.userId === String(userId) && (t.platform || 'jember') === platform && t.status === 'pending' && t.expiresAt > now && Number(t.amount) === amt
     );
     if (activeSession) {
       return res.json({
         sessionId: activeSession.id,
+        platform: platform,
         phoneNumber: activeSession.phoneNumber,
         amount: activeSession.amount,
         requestedAmount: activeSession.requestedAmount || activeSession.amount,
@@ -303,32 +364,32 @@ router.post('/init', (req, res) => {
     }
   }
 
-  // If forceNew is requested OR previous session expired, assign a NEW rotated phone number from the remaining 9 numbers
-  const userRecord = assignmentsData[userId] || {};
+  // Assign a rotated phone number from this platform's dedicated pool
+  const userRecord = assignmentsData[userKey] || {};
   let history = Array.isArray(userRecord.history) ? [...userRecord.history] : [];
   if (userRecord.phone && !history.includes(userRecord.phone)) {
     history.push(userRecord.phone);
   }
 
-  const available = numbers.filter(n => n.active !== false);
-  if (history.length >= available.length) {
+  if (history.length >= activeNumberList.length) {
     const lastPhone = history[history.length - 1];
     history = lastPhone ? [lastPhone] : [];
   }
 
-  assignedPhone = pickPhoneNumber(numbers, activeAssignments, history);
+  const assignedPhone = pickPhoneNumber(activeNumberList, activeAssignments, history);
   history.push(assignedPhone);
 
-  assignmentsData[userId] = {
+  assignmentsData[userKey] = {
     phone: assignedPhone,
+    platform: platform,
     assignedAt: now,
     history: history
   };
   writeJSON('assignments.json', assignmentsData);
 
-  // Mark any old pending sessions as expired
+  // Mark any old pending sessions as expired for this platform:user
   transactions.forEach(t => {
-    if (t.userId === String(userId) && t.status === 'pending') {
+    if (t.userId === String(userId) && (t.platform || 'jember') === platform && t.status === 'pending') {
       t.status = 'expired';
     }
   });
@@ -340,6 +401,7 @@ router.post('/init', (req, res) => {
     id: sessionId,
     orderId: orderId || null,
     userId: String(userId),
+    platform: platform,
     requestedAmount: amt,
     amount: amt,
     phoneNumber: assignedPhone,
@@ -357,6 +419,7 @@ router.post('/init', (req, res) => {
 
   res.json({
     sessionId,
+    platform,
     orderId: orderId || null,
     phoneNumber: assignedPhone,
     amount: amt,
@@ -369,19 +432,16 @@ router.post('/init', (req, res) => {
   });
 });
 
-function getApiKeyForPhone(phoneNumber, settings) {
-  const numbersData = readJSON('numbers.json') || {};
-  const numbers = numbersData.numbers || [];
-
+function getApiKeyForPhone(phoneNumber, settings, platform = 'jember') {
+  const numbers = getPlatformNumbers(platform);
   const normTarget = normalizePhone(phoneNumber);
   let phoneIndex = numbers.findIndex(n => normalizePhone(n.phone) === normTarget);
   if (phoneIndex === -1) phoneIndex = 0;
 
-  // 10 phone numbers mapped to 5 API keys (2 numbers per key)
-  const keyIndex = Math.floor(phoneIndex / 2);
+  // 20 phone numbers mapped to 5 API keys (4 numbers per key)
+  const keyIndex = Math.floor(phoneIndex / 4);
   const keys = Array.isArray(settings.apiKeys) ? settings.apiKeys : [];
-  let selectedKey = keys[keyIndex] ? keys[keyIndex].trim() : '';
-
+  let selectedKey = keys[keyIndex];
   // Fallback if specific slot key is blank
   if (!selectedKey) {
     selectedKey = keys.find(k => k && k.trim()) || settings.verifyApiKey || '';
@@ -490,9 +550,9 @@ async function verifyWithVerifyEt(apiKey, transactionId) {
   }
 }
 
-async function verifyWithVerifyEtMultiKey(settings, transactionId, targetPhoneNumber, activePhones) {
+async function verifyWithVerifyEtMultiKey(settings, transactionId, targetPhoneNumber, activePhones, platform = 'jember') {
   const apiKeys = Array.isArray(settings.apiKeys) ? settings.apiKeys : [];
-  const primaryKey = getApiKeyForPhone(targetPhoneNumber, settings);
+  const primaryKey = getApiKeyForPhone(targetPhoneNumber, settings, platform);
 
   // Build unique list of all configured API keys, trying primary phone key first
   const keysToTry = [];
@@ -556,6 +616,7 @@ router.post('/verify', (req, res) => {
   }
 
   const tx = transactions[idx];
+  const platform = tx.platform || 'jember';
 
   if (Date.now() > tx.expiresAt) {
     transactions[idx].status = 'expired';
@@ -578,15 +639,15 @@ router.post('/verify', (req, res) => {
   transactions[idx].submittedAt = Date.now();
   writeJSON('transactions.json', transactions);
 
-  const settings = readJSON('settings.json') || {};
-  const activePhones = getActivePhoneNumbers();
-  const apiKey = getApiKeyForPhone(tx.phoneNumber, settings);
+  const settings = getPlatformSettings(platform);
+  const activePhones = getActivePhoneNumbers(platform);
+  const apiKey = getApiKeyForPhone(tx.phoneNumber, settings, platform);
 
   // Process verification
   (async () => {
     if (apiKey && apiKey.trim() && !apiKey.includes('_placeholder')) {
       // Call MultiKey Verify.ET algorithm
-      const result = await verifyWithVerifyEtMultiKey(settings, cleanTxId, tx.phoneNumber, activePhones);
+      const result = await verifyWithVerifyEtMultiKey(settings, cleanTxId, tx.phoneNumber, activePhones, platform);
 
       const currentTxs = readJSON('transactions.json') || [];
       const tIdx = currentTxs.findIndex(t => t.id === sessionId);
@@ -753,6 +814,7 @@ router.get('/status/:sessionId', (req, res) => {
   if (!tx) return res.status(404).json({ error: 'Not found' });
   res.json({
     status: tx.status,
+    platform: tx.platform || 'jember',
     amount: tx.amount,
     phoneNumber: tx.phoneNumber || null,
     verifiedAmount: tx.verifiedAmount || tx.amount,
@@ -797,6 +859,7 @@ router.post('/reset', (req, res) => {
   res.json({
     success: true,
     sessionId,
+    platform: tx.platform || 'jember',
     status: 'pending',
     expiresAt: tx.expiresAt,
     phoneNumber: tx.phoneNumber,
