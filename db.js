@@ -32,7 +32,8 @@ db.exec(`
     expiresAt INTEGER NOT NULL,
     submittedAt INTEGER,
     returnUrl TEXT,
-    callbackUrl TEXT
+    callbackUrl TEXT,
+    platform TEXT NOT NULL DEFAULT 'jember'
   );
 
   CREATE INDEX IF NOT EXISTS idx_userId ON transactions(userId);
@@ -40,16 +41,28 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_transactionId ON transactions(transactionId);
 `);
 
+// Safe column migration for existing databases
+try {
+  const tableInfo = db.prepare(`PRAGMA table_info(transactions)`).all();
+  const hasPlatform = tableInfo.some(col => col.name === 'platform');
+  if (!hasPlatform) {
+    db.exec(`ALTER TABLE transactions ADD COLUMN platform TEXT NOT NULL DEFAULT 'jember'`);
+  }
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_platform ON transactions(platform)`);
+} catch (e) {
+  console.error('Migration index notice:', e.message);
+}
+
 // Helper functions for Database Access
 const stmtInsertTx = db.prepare(`
   INSERT OR REPLACE INTO transactions (
     id, orderId, userId, requestedAmount, amount, verifiedAmount,
     phoneNumber, status, transactionId, failReason, receipt,
-    createdAt, expiresAt, submittedAt, returnUrl, callbackUrl
+    createdAt, expiresAt, submittedAt, returnUrl, callbackUrl, platform
   ) VALUES (
     @id, @orderId, @userId, @requestedAmount, @amount, @verifiedAmount,
     @phoneNumber, @status, @transactionId, @failReason, @receipt,
-    @createdAt, @expiresAt, @submittedAt, @returnUrl, @callbackUrl
+    @createdAt, @expiresAt, @submittedAt, @returnUrl, @callbackUrl, @platform
   )
 `);
 
@@ -65,12 +78,13 @@ function saveTx(tx) {
     status: String(tx.status),
     transactionId: tx.transactionId ? String(tx.transactionId).trim().toUpperCase() : null,
     failReason: tx.failReason || null,
-    receipt: tx.receipt ? JSON.stringify(tx.receipt) : null,
+    receipt: tx.receipt ? (typeof tx.receipt === 'string' ? tx.receipt : JSON.stringify(tx.receipt)) : null,
     createdAt: Number(tx.createdAt || Date.now()),
     expiresAt: Number(tx.expiresAt || Date.now() + 20 * 60 * 1000),
     submittedAt: tx.submittedAt ? Number(tx.submittedAt) : null,
     returnUrl: tx.returnUrl || null,
     callbackUrl: tx.callbackUrl || null,
+    platform: String(tx.platform || 'jember').toLowerCase(),
   };
   stmtInsertTx.run(row);
 }
@@ -95,13 +109,13 @@ function getTxByCleanTxId(txId) {
   };
 }
 
-function getActivePendingTx(userId) {
+function getActivePendingTx(userId, platform = 'jember') {
   const now = Date.now();
   const row = db.prepare(`
     SELECT * FROM transactions
-    WHERE userId = ? AND status = 'pending' AND expiresAt > ?
+    WHERE userId = ? AND platform = ? AND status = 'pending' AND expiresAt > ?
     ORDER BY createdAt DESC LIMIT 1
-  `).get(String(userId), now);
+  `).get(String(userId), String(platform).toLowerCase(), now);
   if (!row) return null;
   return {
     ...row,
@@ -109,8 +123,9 @@ function getActivePendingTx(userId) {
   };
 }
 
-function expireOldPendingTxs(userId) {
-  db.prepare(`UPDATE transactions SET status = 'expired' WHERE userId = ? AND status = 'pending'`).run(String(userId));
+function expireOldPendingTxs(userId, platform = 'jember') {
+  db.prepare(`UPDATE transactions SET status = 'expired' WHERE userId = ? AND platform = ? AND status = 'pending'`)
+    .run(String(userId), String(platform).toLowerCase());
 }
 
 function expireAllOldPendingTxs() {
@@ -126,6 +141,11 @@ function getAllTxs(filters = {}) {
   let sql = `SELECT * FROM transactions`;
   const conditions = [];
   const params = [];
+
+  if (filters.platform && filters.platform !== 'all') {
+    conditions.push(`platform = ?`);
+    params.push(String(filters.platform).toLowerCase());
+  }
 
   if (filters.status && filters.status !== 'all') {
     conditions.push(`status = ?`);
@@ -151,11 +171,19 @@ function getAllTxs(filters = {}) {
   }));
 }
 
-function getStats() {
-  const total = db.prepare(`SELECT COUNT(*) as cnt FROM transactions`).get().cnt;
-  const verified = db.prepare(`SELECT COUNT(*) as cnt, SUM(verifiedAmount) as totalAmount FROM transactions WHERE status = 'verified'`).get();
-  const pending = db.prepare(`SELECT COUNT(*) as cnt FROM transactions WHERE status = 'pending'`).get().cnt;
-  const failed = db.prepare(`SELECT COUNT(*) as cnt FROM transactions WHERE status = 'failed'`).get().cnt;
+function getStats(platform = 'all') {
+  let whereClause = '';
+  const params = [];
+
+  if (platform && platform !== 'all') {
+    whereClause = ` WHERE platform = ?`;
+    params.push(String(platform).toLowerCase());
+  }
+
+  const total = db.prepare(`SELECT COUNT(*) as cnt FROM transactions${whereClause}`).get(...params).cnt;
+  const verified = db.prepare(`SELECT COUNT(*) as cnt, SUM(verifiedAmount) as totalAmount FROM transactions WHERE status = 'verified'${whereClause ? ' AND platform = ?' : ''}`).get(...params);
+  const pending = db.prepare(`SELECT COUNT(*) as cnt FROM transactions WHERE status = 'pending'${whereClause ? ' AND platform = ?' : ''}`).get(...params).cnt;
+  const failed = db.prepare(`SELECT COUNT(*) as cnt FROM transactions WHERE status = 'failed'${whereClause ? ' AND platform = ?' : ''}`).get(...params).cnt;
 
   return {
     totalTransactions: total,
