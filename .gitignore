@@ -1,20 +1,9 @@
-# Dependencies
-node_modules/
-
-# Local data files
-backend/data/*.json
-
-# Secret / sensitive scripts - DO NOT UPLOAD
-generate-test-links.js
-
-# Environment files
+node_modules
 .env
-.env.local
-.env.production
-
-# Build output
-frontend/dist/
-
-# Logs
+database.sqlite
+database.sqlite-wal
+database.sqlite-shm
 *.log
-npm-debug.log*
+data/settings.json
+data/numbers.json
+data/assignments.json
