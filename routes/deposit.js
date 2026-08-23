@@ -318,51 +318,12 @@ router.post('/test-callback', (req, res) => {
 router.post('/init', (req, res) => {
   let tokenPayload = {};
   const rawToken = req.body.token || req.headers['x-ckpay-token'] || null;
-  const transactions = readJSON('transactions.json') || [];
-  const now = Date.now();
-  const reqSessionId = req.body.sessionId || req.query.sessionId;
-
-  // 1. Instant Session Recovery by sessionId (for tab refresh / low RAM reload)
-  if (reqSessionId && !req.body.forceNew) {
-    const existingTx = transactions.find(t => t.id === reqSessionId && t.expiresAt > now && (t.status === 'pending' || t.status === 'processing'));
-    if (existingTx) {
-      const plat = existingTx.platform || 'jember';
-      const platSettings = getPlatformSettings(plat);
-      return res.json({
-        sessionId: existingTx.id,
-        platform: plat,
-        orderId: existingTx.orderId || null,
-        phoneNumber: existingTx.phoneNumber,
-        amount: existingTx.amount,
-        requestedAmount: existingTx.requestedAmount || existingTx.amount,
-        expiresAt: existingTx.expiresAt,
-        sessionExpiry: platSettings.sessionExpiry || 20,
-        currency: platSettings.currency || 'ETB',
-        minDeposit: platSettings.minDeposit,
-        maxDeposit: platSettings.maxDeposit,
-        returnUrl: existingTx.returnUrl || null,
-        callbackUrl: existingTx.callbackUrl || null,
-      });
-    }
-  }
-
   if (rawToken) {
     try {
       tokenPayload = jwt.verify(rawToken, JWT_SECRET);
     } catch (err) {
-      // Graceful recovery: if JWT expired while user was in Telebirr app, check if user has active unexpired session
-      const decoded = jwt.decode(rawToken);
-      if (decoded && (decoded.id || decoded.userId)) {
-        const uId = String(decoded.id || decoded.userId);
-        const hasActiveSession = transactions.some(t => t.userId === uId && t.expiresAt > now && (t.status === 'pending' || t.status === 'processing'));
-        if (hasActiveSession) {
-          tokenPayload = decoded;
-        } else {
-          return res.status(401).json({ error: 'Invalid or expired payment token. Please start a new deposit session.' });
-        }
-      } else {
-        return res.status(401).json({ error: 'Invalid or expired payment token. Please start a new deposit session.' });
-      }
+      try { tokenPayload = jwt.decode(rawToken) || {}; } catch {}
+      return res.status(401).json({ error: 'Invalid or expired payment token. Please start a new deposit session.' });
     }
   }
 
@@ -398,18 +359,20 @@ router.post('/init', (req, res) => {
 
   let assignmentsData = readJSON('assignments.json') || {};
   const activeAssignments = getActiveAssignments(assignmentsData);
+  const transactions = readJSON('transactions.json') || [];
+  const now = Date.now();
+
   const userKey = `${platform}:${userId}`;
 
-  // Re-use active pending/processing session on refresh ONLY if forceNew is not requested and amount matches
+  // Re-use active pending session on refresh ONLY if forceNew is not requested and amount matches
   if (!forceNew) {
     const activeSession = transactions.find(
-      t => t.userId === String(userId) && (t.platform || 'jember') === platform && (t.status === 'pending' || t.status === 'processing') && t.expiresAt > now && Number(t.amount) === amt
+      t => t.userId === String(userId) && (t.platform || 'jember') === platform && t.status === 'pending' && t.expiresAt > now && Number(t.amount) === amt
     );
     if (activeSession) {
       return res.json({
         sessionId: activeSession.id,
         platform: platform,
-        orderId: activeSession.orderId || orderId || null,
         phoneNumber: activeSession.phoneNumber,
         amount: activeSession.amount,
         requestedAmount: activeSession.requestedAmount || activeSession.amount,
@@ -815,6 +778,32 @@ router.post('/fail', (req, res) => {
   }
 
   res.json({ success: true, status: 'pending' });
+});
+
+router.get('/session/:sessionId', (req, res) => {
+  const transactions = readJSON('transactions.json') || [];
+  const tx = transactions.find(t => t.id === req.params.sessionId);
+  if (!tx) return res.status(404).json({ error: 'Session not found' });
+  const platform = tx.platform || 'jember';
+  const settings = getPlatformSettings(platform);
+
+  res.json({
+    sessionId: tx.id,
+    platform: platform,
+    status: tx.status,
+    phoneNumber: tx.phoneNumber || null,
+    amount: tx.amount,
+    requestedAmount: tx.requestedAmount || tx.amount,
+    expiresAt: tx.expiresAt,
+    sessionExpiry: settings.sessionExpiry || 20,
+    currency: settings.currency || 'ETB',
+    minDeposit: settings.minDeposit || 100,
+    maxDeposit: settings.maxDeposit || 50000,
+    returnUrl: tx.returnUrl || null,
+    callbackUrl: tx.callbackUrl || null,
+    transactionId: tx.transactionId || null,
+    failReason: tx.failReason || null,
+  });
 });
 
 router.get('/status/:sessionId', (req, res) => {
