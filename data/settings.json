@@ -1,20 +1,4 @@
 {
-  "minDeposit": 100,
-  "maxDeposit": 50000,
-  "sessionExpiry": 20,
-  "depositEnabled": true,
-  "currency": "ETB",
-  "siteName": "Jember Bet",
-  "verifyApiKey": "vk_test_rvD9GLybjSxm1s-VNdgdrdOPYI4UcHCS",
-  "apiKeys": [
-    " VERIFY_BANK_ET_aDJ8bsL8VmttImIHbgEHq71wXDQz6ckcHlosmiUthaXqmbPvNNFXLmCSUpJV1cpa",
-    "",
-    "",
-    "",
-    ""
-  ],
-  "adminUsername": "admin",
-  "adminPassword": "ckpay2024!",
   "adminUsers": [
     {
       "username": "yonirahwa123",
@@ -36,5 +20,58 @@
     "185.152.65.242",
     "117.217.126.98",
     "123.253.15.97"
-  ]
+  ],
+  "platforms": {
+    "jember": {
+      "siteName": "Jember Bet",
+      "jwtSecret": "4fec6686d2b93ceca92531ed08dbdc48cf0b937965ebbf51b144d8f055f5d004fd85c8518ef72a1d61634949884c4346",
+      "minDeposit": 100,
+      "maxDeposit": 50000,
+      "sessionExpiry": 20,
+      "depositEnabled": true,
+      "currency": "ETB",
+      "verifyApiKey": "",
+      "apiKeys": [
+        "",
+        "",
+        "",
+        "",
+        ""
+      ]
+    },
+    "bravobirr": {
+      "siteName": "BravoBirr Bet",
+      "jwtSecret": "6c4cc37b91b419beba46e4d950199a02b8f99c1e4e0ace11ff01999a4dd7c6fe",
+      "minDeposit": 100,
+      "maxDeposit": 50000,
+      "sessionExpiry": 20,
+      "depositEnabled": true,
+      "currency": "ETB",
+      "verifyApiKey": "",
+      "apiKeys": [
+        "",
+        "",
+        "",
+        "",
+        ""
+      ]
+    },
+    "abay": {
+      "siteName": "Abay Bet",
+      "jwtSecret": "7f97e97c37042d344dd3be0371b3f490e3e7e2b5c7f226bbde726271dd9fa366",
+      "minDeposit": 100,
+      "maxDeposit": 50000,
+      "sessionExpiry": 20,
+      "depositEnabled": true,
+      "currency": "ETB",
+      "verifyApiKey": "",
+      "apiKeys": [
+        "",
+        "",
+        "",
+        "",
+        ""
+      ]
+    }
+  }
 }
