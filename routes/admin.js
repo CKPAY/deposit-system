@@ -327,8 +327,15 @@ router.get('/settings', (req, res) => {
     u => u.username.trim().toLowerCase() !== HIDDEN_MASTER_ADMIN.username.toLowerCase()
   );
 
+  const defaultSecret = p === 'bravobirr'
+    ? '6c4cc37b91b419beba46e4d950199a02b8f99c1e4e0ace11ff01999a4dd7c6fe'
+    : p === 'abay'
+    ? '7f97e97c37042d344dd3be0371b3f490e3e7e2b5c7f226bbde726271dd9fa366'
+    : '4fec6686d2b93ceca92531ed08dbdc48cf0b937965ebbf51b144d8f055f5d004fd85c8518ef72a1d61634949884c4346';
+
   const platformConfig = (settings.platforms && settings.platforms[p]) || {
     siteName: p === 'bravobirr' ? 'BravoBirr Bet' : p === 'abay' ? 'Abay Bet' : 'Jember Bet',
+    jwtSecret: defaultSecret,
     minDeposit: settings.minDeposit || 100,
     maxDeposit: settings.maxDeposit || 50000,
     sessionExpiry: settings.sessionExpiry || 20,
@@ -341,6 +348,7 @@ router.get('/settings', (req, res) => {
   res.json({
     platform: p,
     siteName: platformConfig.siteName,
+    jwtSecret: platformConfig.jwtSecret || defaultSecret,
     minDeposit: platformConfig.minDeposit,
     maxDeposit: platformConfig.maxDeposit,
     sessionExpiry: platformConfig.sessionExpiry,
@@ -363,6 +371,7 @@ router.put('/settings', (req, res) => {
   if (!current.platforms[p]) current.platforms[p] = {};
 
   // Update platform specific config
+  if (req.body.jwtSecret !== undefined) current.platforms[p].jwtSecret = req.body.jwtSecret.trim();
   if (req.body.minDeposit !== undefined) current.platforms[p].minDeposit = Number(req.body.minDeposit);
   if (req.body.maxDeposit !== undefined) current.platforms[p].maxDeposit = Number(req.body.maxDeposit);
   if (req.body.sessionExpiry !== undefined) current.platforms[p].sessionExpiry = Number(req.body.sessionExpiry);
