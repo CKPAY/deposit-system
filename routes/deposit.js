@@ -91,7 +91,7 @@ function normalizePhone(p) {
   if (!p) return '';
   let str = String(p).replace(/\D/g, '');
   if (str.startsWith('251')) str = '0' + str.slice(3);
-  if (str.length === 9 && str.startsWith('9')) str = '0' + str;
+  if (str.length === 9 && (str.startsWith('9') || str.startsWith('7'))) str = '0' + str;
   return str;
 }
 
@@ -157,21 +157,44 @@ function getActivePhoneNumbers(platform = 'jember') {
 }
 
 function matchesMaskedPhone(creditedStr, activePhones) {
-  if (!creditedStr) return true;
+  if (!creditedStr || !Array.isArray(activePhones) || activePhones.length === 0) return false;
   const str = String(creditedStr).trim();
-  if (!str) return true;
+  if (!str) return false;
 
-  if (!str.includes('*')) {
-    const norm = normalizePhone(str);
-    return norm.length < 9 || activePhones.includes(norm);
+  // If contains letters only or no digits at all (e.g. merchant name, bank name without account), reject
+  const digitsOnly = str.replace(/\D/g, '');
+  if (digitsOnly.length === 0) return false;
+
+  // Case 1: Masked phone number (e.g. '2519****7604', '0912****04', '09****2277', '2517****1234')
+  if (str.includes('*')) {
+    const parts = str.split(/\*+/);
+    const prefixRaw = parts[0] ? parts[0].replace(/\D/g, '') : '';
+    const suffix = parts[parts.length - 1] ? parts[parts.length - 1].replace(/\D/g, '') : '';
+
+    // Telebirr masked phone must have at least 2 suffix digits (usually 4 digits, e.g. 7604)
+    if (suffix.length < 2) return false;
+
+    let prefix = '';
+    if (prefixRaw.startsWith('2519') || prefixRaw === '9' || prefixRaw === '09') prefix = '09';
+    else if (prefixRaw.startsWith('2517') || prefixRaw === '7' || prefixRaw === '07') prefix = '07';
+
+    return activePhones.some(ph => {
+      const normPh = normalizePhone(ph);
+      if (!normPh.endsWith(suffix)) return false;
+      if (prefix && !normPh.startsWith(prefix)) return false;
+      return true;
+    });
   }
 
-  const last4 = str.slice(-4);
-  if (/^\d{4}$/.test(last4)) {
-    return activePhones.some(ph => ph.endsWith(last4));
+  // Case 2: Full unmasked receiver phone (e.g. '0922319389', '251922319389', '0940072277')
+  const norm = normalizePhone(str);
+  // Must be a valid 10-digit Ethiopian mobile number (09xxxxxxxx or 07xxxxxxxx)
+  if (!/^0[97]\d{8}$/.test(norm)) {
+    // If it's a shortcode like 6464, 8989, or Siinqee bank account, REJECT!
+    return false;
   }
 
-  return true;
+  return activePhones.some(ph => normalizePhone(ph) === norm);
 }
 
 function extractTransactionId(text) {
