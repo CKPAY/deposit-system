@@ -6,17 +6,28 @@ const { v4: uuidv4 } = require('uuid');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 
-// Shared JWT secret key — keep this private, share only with Jember Bet!
-const JWT_SECRET = process.env.JWT_SECRET || '4fec6686d2b93ceca92531ed08dbdc48cf0b937965ebbf51b144d8f055f5d004fd85c8518ef72a1d61634949884c4346';
+// Secret Keys per betting platform
+function getPlatformSecret(platform = 'jember') {
+  const p = String(platform || 'jember').toLowerCase();
+  const raw = readJSON('settings.json') || {};
+  if (raw.platforms && raw.platforms[p] && raw.platforms[p].jwtSecret) {
+    return raw.platforms[p].jwtSecret;
+  }
+  if (p === 'bravobirr') return '6c4cc37b91b419beba46e4d950199a02b8f99c1e4e0ace11ff01999a4dd7c6fe';
+  if (p === 'abay') return '7f97e97c37042d344dd3be0371b3f490e3e7e2b5c7f226bbde726271dd9fa366';
+  return process.env.JWT_SECRET || '4fec6686d2b93ceca92531ed08dbdc48cf0b937965ebbf51b144d8f055f5d004fd85c8518ef72a1d61634949884c4346';
+}
 
 // Standardized Webhook Payload Generator for ALL 3 statuses (verified, failed, expired)
 function createWebhookPayload(tx, status, verifiedAmt = 0, receiptData = {}, errorMessage = null) {
   const timestamp = Date.now();
   const orderId = tx.orderId || tx.order_id || null;
   const verifiedAmount = Number(verifiedAmt) || 0;
+  const platform = tx.platform || 'jember';
+  const secret = getPlatformSecret(platform);
   
   const rawSigString = `${tx.id}:${orderId || ''}:${verifiedAmount}:${status}:${timestamp}`;
-  const signature = crypto.createHmac('sha256', JWT_SECRET).update(rawSigString).digest('hex');
+  const signature = crypto.createHmac('sha256', secret).update(rawSigString).digest('hex');
 
   return {
     status,
@@ -317,17 +328,27 @@ router.post('/test-callback', (req, res) => {
 
 router.post('/init', (req, res) => {
   let tokenPayload = {};
+  let detectedPlatformFromToken = null;
   const rawToken = req.body.token || req.headers['x-ckpay-token'] || null;
+
   if (rawToken) {
-    try {
-      tokenPayload = jwt.verify(rawToken, JWT_SECRET);
-    } catch (err) {
+    // Check against each platform secret (jember, bravobirr, abay)
+    for (const plat of ['jember', 'bravobirr', 'abay']) {
+      try {
+        const sec = getPlatformSecret(plat);
+        tokenPayload = jwt.verify(rawToken, sec);
+        detectedPlatformFromToken = plat;
+        break;
+      } catch {}
+    }
+
+    if (!detectedPlatformFromToken) {
       try { tokenPayload = jwt.decode(rawToken) || {}; } catch {}
       return res.status(401).json({ error: 'Invalid or expired payment token. Please start a new deposit session.' });
     }
   }
 
-  const platform = detectPlatform(req, tokenPayload);
+  const platform = detectedPlatformFromToken || detectPlatform(req, tokenPayload);
   const settings = getPlatformSettings(platform);
 
   // Support both CK-PAY and standard parameter names
@@ -452,6 +473,8 @@ router.post('/init', (req, res) => {
     currency: settings.currency,
     minDeposit: settings.minDeposit,
     maxDeposit: settings.maxDeposit,
+    returnUrl: returnUrl || null,
+    callbackUrl: callbackUrl || null,
   });
 });
 
