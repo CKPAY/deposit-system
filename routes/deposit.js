@@ -735,70 +735,19 @@ router.post('/verify', (req, res) => {
           currentTxs[tIdx].submittedAt = null;
           currentTxs[tIdx].failReason = result.message || 'Invalid transaction ID or receipt not found. Please try again.';
           writeJSON('transactions.json', currentTxs);
-          // Note: saveTx NOT called — failed txIds are not stored in SQLite
         }
       }
     } else {
-      // Fallback simulation mode if no API key is provided
-      setTimeout(() => {
-        const currentTxs = readJSON('transactions.json') || [];
-        const tIdx = currentTxs.findIndex(t => t.id === sessionId);
-        if (tIdx !== -1 && currentTxs[tIdx].status === 'processing') {
-          const verifiedAmt = customVerifiedAmount ? Number(customVerifiedAmount) : currentTxs[tIdx].amount;
-          const minDeposit = settings.minDeposit || 100;
-          const maxDeposit = settings.maxDeposit || 50000;
-
-          if (verifiedAmt < minDeposit) {
-            currentTxs[tIdx].status = 'failed';
-            currentTxs[tIdx].failReason = `Verified amount (${verifiedAmt.toFixed(2)} ETB) is below minimum deposit limit of ${minDeposit} ETB.`;
-            writeJSON('transactions.json', currentTxs);
-            return;
-          }
-
-          if (verifiedAmt > maxDeposit) {
-            currentTxs[tIdx].status = 'failed';
-            currentTxs[tIdx].failReason = `Verified amount (${verifiedAmt.toFixed(2)} ETB) exceeds maximum deposit limit of ${maxDeposit} ETB.`;
-            writeJSON('transactions.json', currentTxs);
-            return;
-          }
-          currentTxs[tIdx].amount = verifiedAmt;
-          currentTxs[tIdx].verifiedAmount = verifiedAmt;
-          currentTxs[tIdx].status = 'verified';
-          writeJSON('transactions.json', currentTxs);
-
-          if (currentTxs[tIdx].callbackUrl) {
-            try {
-              const timestamp = Date.now();
-              const orderId = currentTxs[tIdx].orderId || currentTxs[tIdx].order_id || null;
-              const rawSigString = `${currentTxs[tIdx].id}:${orderId || ''}:${verifiedAmt}:verified:${timestamp}`;
-              const signature = crypto.createHmac('sha256', JWT_SECRET).update(rawSigString).digest('hex');
-
-              const payload = {
-                status: 'verified',
-                sessionId: currentTxs[tIdx].id,
-                userId: currentTxs[tIdx].userId,
-                orderId: orderId,
-                requestedAmount: currentTxs[tIdx].requestedAmount || currentTxs[tIdx].amount,
-                verifiedAmount: verifiedAmt,
-                amount: verifiedAmt,
-                transactionId: currentTxs[tIdx].transactionId,
-                phoneNumber: currentTxs[tIdx].phoneNumber,
-                timestamp: timestamp,
-                signature: signature
-              };
-
-              fetch(currentTxs[tIdx].callbackUrl, {
-                method: 'POST',
-                headers: {
-                  'Content-Type': 'application/json',
-                  'X-CKPAY-Signature': signature
-                },
-                body: JSON.stringify(payload)
-              }).catch(err => console.error('Webhook error:', err));
-            } catch (e) {}
-          }
-        }
-      }, 2000);
+      // If no valid API key is configured for this platform, reject verification immediately!
+      const currentTxs = readJSON('transactions.json') || [];
+      const tIdx = currentTxs.findIndex(t => t.id === sessionId);
+      if (tIdx !== -1) {
+        currentTxs[tIdx].status = 'pending';
+        currentTxs[tIdx].transactionId = null;
+        currentTxs[tIdx].submittedAt = null;
+        currentTxs[tIdx].failReason = 'Verification service is not configured for this platform. Please contact support.';
+        writeJSON('transactions.json', currentTxs);
+      }
     }
   })();
 
