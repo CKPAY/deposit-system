@@ -193,8 +193,11 @@ function getEthiopianTimeMidnightTimestamps() {
   // Today start at 00:00:00 GMT+3 (Midnight in Ethiopia)
   const todayStartUTC = Date.UTC(year, month, day) - ETHIOPIA_OFFSET_MS;
 
-  // Last 7 days in GMT+3 (Rolling 7 days from today midnight)
-  const weekStartUTC = todayStartUTC - (6 * 24 * 60 * 60 * 1000);
+  // This Week: Monday 00:00:00 EAT of the current calendar week
+  // getUTCDay() → 0=Sun, 1=Mon, 2=Tue, ... 6=Sat
+  const dayOfWeek = eatDate.getUTCDay(); // 0=Sun, 1=Mon...
+  const daysFromMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1; // Monday=0, Sun=6
+  const weekStartUTC = todayStartUTC - (daysFromMonday * 24 * 60 * 60 * 1000);
 
   // Month start: 1st of month at 00:00:00 GMT+3 (1st of month midnight in Ethiopia)
   const monthStartUTC = Date.UTC(year, month, 1) - ETHIOPIA_OFFSET_MS;
