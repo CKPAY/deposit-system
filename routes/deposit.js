@@ -385,8 +385,17 @@ router.post('/init', (req, res) => {
 
   const userKey = `${platform}:${userId}`;
 
-  // Re-use active pending session on refresh ONLY if forceNew is not requested and amount matches
-  if (!forceNew) {
+  // Re-use active pending session ONLY for browser reloads (no token, same amount & orderId)
+  // If a fresh token came in with a different amount, always start a new session
+  if (!forceNew && rawToken) {
+    // Fresh token = new deposit request: expire any old pending session for this platform:user
+    transactions.forEach(t => {
+      if (t.userId === String(userId) && (t.platform || 'jember') === platform && t.status === 'pending') {
+        t.status = 'expired';
+      }
+    });
+    writeJSON('transactions.json', transactions);
+  } else if (!forceNew && !rawToken) {
     const activeSession = transactions.find(
       t => t.userId === String(userId) && (t.platform || 'jember') === platform && t.status === 'pending' && t.expiresAt > now && Number(t.amount) === amt
     );
