@@ -39,6 +39,28 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_userId ON transactions(userId);
   CREATE INDEX IF NOT EXISTS idx_status ON transactions(status);
   CREATE INDEX IF NOT EXISTS idx_transactionId ON transactions(transactionId);
+
+  CREATE TABLE IF NOT EXISTS withdrawals (
+    id TEXT PRIMARY KEY,
+    orderId TEXT,
+    userId TEXT NOT NULL,
+    amount REAL NOT NULL,
+    phoneNumber TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    transactionId TEXT,
+    rejectReason TEXT,
+    processedBy TEXT,
+    platform TEXT NOT NULL DEFAULT 'jember',
+    createdAt INTEGER NOT NULL,
+    processedAt INTEGER,
+    returnUrl TEXT,
+    callbackUrl TEXT
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_w_status ON withdrawals(status);
+  CREATE INDEX IF NOT EXISTS idx_w_platform ON withdrawals(platform);
+  CREATE INDEX IF NOT EXISTS idx_w_userId ON withdrawals(userId);
+  CREATE INDEX IF NOT EXISTS idx_w_createdAt ON withdrawals(createdAt);
 `);
 
 // Safe column migration for existing databases
@@ -222,23 +244,133 @@ function getStats(platform = 'all', timestamps = {}) {
   };
 }
 
-// Automatically migrate transactions.json to SQLite if file exists
-const jsonPath = path.join(dataDir, 'transactions.json');
-if (fs.existsSync(jsonPath)) {
-  try {
-    const raw = fs.readFileSync(jsonPath, 'utf8');
-    const jsonTxs = JSON.parse(raw);
-    if (Array.isArray(jsonTxs) && jsonTxs.length > 0) {
-      const migrateMany = db.transaction((txs) => {
-        for (const t of txs) {
-          saveTx(t);
-        }
-      });
-      migrateMany(jsonTxs);
-    }
-  } catch (e) {
-    console.error('Migration notice:', e.message);
+// ─── WITHDRAWAL HELPER FUNCTIONS ─────────────────────────────────────────────
+const stmtInsertWithdrawal = db.prepare(`
+  INSERT OR REPLACE INTO withdrawals (
+    id, orderId, userId, amount, phoneNumber, status,
+    transactionId, rejectReason, processedBy, platform,
+    createdAt, processedAt, returnUrl, callbackUrl
+  ) VALUES (
+    @id, @orderId, @userId, @amount, @phoneNumber, @status,
+    @transactionId, @rejectReason, @processedBy, @platform,
+    @createdAt, @processedAt, @returnUrl, @callbackUrl
+  )
+`);
+
+function saveWithdrawal(w) {
+  const row = {
+    id: w.id,
+    orderId: w.orderId || null,
+    userId: String(w.userId),
+    amount: Number(w.amount),
+    phoneNumber: String(w.phoneNumber),
+    status: String(w.status || 'pending'),
+    transactionId: w.transactionId ? String(w.transactionId).trim().toUpperCase() : null,
+    rejectReason: w.rejectReason || null,
+    processedBy: w.processedBy || null,
+    platform: String(w.platform || 'jember').toLowerCase(),
+    createdAt: Number(w.createdAt || Date.now()),
+    processedAt: w.processedAt ? Number(w.processedAt) : null,
+    returnUrl: w.returnUrl || null,
+    callbackUrl: w.callbackUrl || null,
+  };
+  stmtInsertWithdrawal.run(row);
+  return row;
+}
+
+function getWithdrawalById(id) {
+  return db.prepare(`SELECT * FROM withdrawals WHERE id = ?`).get(id) || null;
+}
+
+function updateWithdrawalStatus(id, status, { transactionId = null, rejectReason = null, processedBy = null } = {}) {
+  const now = Date.now();
+  db.prepare(`
+    UPDATE withdrawals
+    SET status = ?,
+        transactionId = COALESCE(?, transactionId),
+        rejectReason = COALESCE(?, rejectReason),
+        processedBy = COALESCE(?, processedBy),
+        processedAt = ?
+    WHERE id = ?
+  `).run(status, transactionId, rejectReason, processedBy, now, id);
+  return getWithdrawalById(id);
+}
+
+function getAllWithdrawals(filters = {}) {
+  let sql = `SELECT * FROM withdrawals`;
+  const conditions = [];
+  const params = [];
+
+  if (filters.platform && filters.platform !== 'all') {
+    conditions.push(`platform = ?`);
+    params.push(String(filters.platform).toLowerCase());
   }
+
+  if (filters.status && filters.status !== 'all') {
+    conditions.push(`status = ?`);
+    params.push(filters.status);
+  }
+
+  if (filters.search) {
+    conditions.push(`(userId LIKE ? OR phoneNumber LIKE ? OR transactionId LIKE ? OR orderId LIKE ? OR id LIKE ?)`);
+    const term = `%${filters.search}%`;
+    params.push(term, term, term, term, term);
+  }
+
+  if (conditions.length > 0) {
+    sql += ` WHERE ` + conditions.join(' AND ');
+  }
+
+  sql += ` ORDER BY createdAt DESC LIMIT 1000`;
+  return db.prepare(sql).all(...params);
+}
+
+function getWithdrawalStats(platform = 'all', timestamps = {}) {
+  let whereClause = '';
+  const params = [];
+
+  if (platform && platform !== 'all') {
+    whereClause = ' WHERE platform = ?';
+    params.push(String(platform).toLowerCase());
+  }
+
+  const todayStart = Number(timestamps.todayStart) || 0;
+  const weekStart = Number(timestamps.weekStart) || 0;
+  const monthStart = Number(timestamps.monthStart) || 0;
+
+  const sql = `
+    SELECT
+      COUNT(*) as total,
+      COUNT(CASE WHEN status = 'pending' THEN 1 END) as pendingCount,
+      COUNT(CASE WHEN status = 'processing' THEN 1 END) as processingCount,
+      COUNT(CASE WHEN status = 'completed' THEN 1 END) as completedCount,
+      COUNT(CASE WHEN status = 'rejected' THEN 1 END) as rejectedCount,
+      SUM(CASE WHEN status = 'completed' THEN amount ELSE 0 END) as totalPaidETB,
+      SUM(CASE WHEN status = 'completed' AND processedAt >= ${todayStart} THEN amount ELSE 0 END) as todayPaidETB,
+      SUM(CASE WHEN status = 'completed' AND processedAt >= ${weekStart} THEN amount ELSE 0 END) as weekPaidETB,
+      SUM(CASE WHEN status = 'completed' AND processedAt >= ${monthStart} THEN amount ELSE 0 END) as monthPaidETB,
+      COUNT(CASE WHEN status = 'completed' AND processedAt >= ${todayStart} THEN 1 END) as todayCount,
+      COUNT(CASE WHEN status = 'completed' AND processedAt >= ${weekStart} THEN 1 END) as weekCount,
+      COUNT(CASE WHEN status = 'completed' AND processedAt >= ${monthStart} THEN 1 END) as monthCount
+    FROM withdrawals${whereClause}
+  `;
+
+  const row = db.prepare(sql).get(...params) || {};
+  return {
+    platform,
+    total: row.total || 0,
+    pendingCount: row.pendingCount || 0,
+    processingCount: row.processingCount || 0,
+    completedCount: row.completedCount || 0,
+    rejectedCount: row.rejectedCount || 0,
+    totalPaidETB: row.totalPaidETB || 0,
+    todayPaidETB: row.todayPaidETB || 0,
+    weekPaidETB: row.weekPaidETB || 0,
+    monthPaidETB: row.monthPaidETB || 0,
+    todayCount: row.todayCount || 0,
+    weekCount: row.weekCount || 0,
+    monthCount: row.monthCount || 0,
+  };
 }
 
 module.exports = {
@@ -251,4 +383,9 @@ module.exports = {
   expireAllOldPendingTxs,
   getAllTxs,
   getStats,
+  saveWithdrawal,
+  getWithdrawalById,
+  updateWithdrawalStatus,
+  getAllWithdrawals,
+  getWithdrawalStats,
 };
