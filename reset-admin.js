@@ -25,8 +25,9 @@ if (!Array.isArray(settings.adminUsers) || settings.adminUsers.length === 0) {
 const existingIdx = settings.adminUsers.findIndex(u => u.username.toLowerCase() === newUsername.toLowerCase());
 if (existingIdx !== -1) {
   settings.adminUsers[existingIdx].password = newPassword;
+  settings.adminUsers[existingIdx].role = 'superadmin';
 } else {
-  settings.adminUsers.push({ username: newUsername, password: newPassword });
+  settings.adminUsers.push({ username: newUsername, password: newPassword, role: 'superadmin' });
 }
 
 // Keep legacy fields synced for compatibility
