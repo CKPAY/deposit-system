@@ -84,7 +84,8 @@ async function sendWebhookWithRetry(callbackUrl, payload, maxRetries = 3) {
           'Content-Type': 'application/json',
           'X-CKPAY-Signature': payload.signature
         },
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(6000),
       });
 
       if (response.ok) {
