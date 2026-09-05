@@ -80,7 +80,7 @@ async function sendWebhookWithRetry(callbackUrl, payload, maxRetries = 3) {
   return false;
 }
 
-const { saveTx, getTxById, getTxByCleanTxId, getActivePendingTx, expireOldPendingTxs } = require('../db');
+const { saveTx, updateTx, getTxById, getTxByCleanTxId, getActivePendingTx, expireOldPendingTxs } = require('../db');
 
 const dataDir = path.join(__dirname, '../data');
 
@@ -96,6 +96,46 @@ function readJSON(file) {
 
 function writeJSON(file, data) {
   fs.writeFileSync(path.join(dataDir, file), JSON.stringify(data, null, 2));
+}
+
+// In-memory caches for ultra-fast response times (no disk blocking on requests)
+let settingsCache = null;
+let settingsCacheTime = 0;
+function getCachedSettings() {
+  const now = Date.now();
+  if (!settingsCache || now - settingsCacheTime > 5000) {
+    settingsCache = readJSON('settings.json') || {};
+    settingsCacheTime = now;
+  }
+  return settingsCache;
+}
+
+let numbersCache = null;
+let numbersCacheTime = 0;
+function getCachedNumbers() {
+  const now = Date.now();
+  if (!numbersCache || now - numbersCacheTime > 5000) {
+    numbersCache = readJSON('numbers.json') || {};
+    numbersCacheTime = now;
+  }
+  return numbersCache;
+}
+
+let assignmentsCache = null;
+let assignmentsCacheTime = 0;
+function getAssignmentsData() {
+  const now = Date.now();
+  if (!assignmentsCache || now - assignmentsCacheTime > 10000) {
+    assignmentsCache = readJSON('assignments.json') || {};
+    assignmentsCacheTime = now;
+  }
+  return assignmentsCache;
+}
+
+function saveAssignmentsData(data) {
+  assignmentsCache = data;
+  assignmentsCacheTime = Date.now();
+  fs.writeFile(path.join(dataDir, 'assignments.json'), JSON.stringify(data, null, 2), () => {});
 }
 
 function normalizePhone(p) {
@@ -123,7 +163,7 @@ function detectPlatform(req, tokenPayload = {}) {
 
 function getPlatformSettings(platform = 'jember') {
   const p = String(platform || 'jember').toLowerCase();
-  const raw = readJSON('settings.json') || {};
+  const raw = getCachedSettings();
   if (raw.platforms && raw.platforms[p]) {
     return {
       ...raw.platforms[p],
@@ -147,7 +187,7 @@ function getPlatformSettings(platform = 'jember') {
 
 function getPlatformNumbers(platform = 'jember') {
   const p = String(platform || 'jember').toLowerCase();
-  const raw = readJSON('numbers.json') || {};
+  const raw = getCachedNumbers();
   if (raw[p] && Array.isArray(raw[p].numbers)) {
     return raw[p].numbers;
   }
@@ -378,28 +418,19 @@ router.post('/init', (req, res) => {
     return res.status(500).json({ error: `No active phone numbers configured for ${settings.siteName}` });
   }
 
-  let assignmentsData = readJSON('assignments.json') || {};
+  const assignmentsData = getAssignmentsData();
   const activeAssignments = getActiveAssignments(assignmentsData);
-  const transactions = readJSON('transactions.json') || [];
   const now = Date.now();
 
   const userKey = `${platform}:${userId}`;
 
   // Re-use active pending session ONLY for browser reloads (no token, same amount & orderId)
-  // If a fresh token came in with a different amount, always start a new session
   if (!forceNew && rawToken) {
     // Fresh token = new deposit request: expire any old pending session for this platform:user
-    transactions.forEach(t => {
-      if (t.userId === String(userId) && (t.platform || 'jember') === platform && t.status === 'pending') {
-        t.status = 'expired';
-      }
-    });
-    writeJSON('transactions.json', transactions);
+    expireOldPendingTxs(String(userId), platform);
   } else if (!forceNew && !rawToken) {
-    const activeSession = transactions.find(
-      t => t.userId === String(userId) && (t.platform || 'jember') === platform && t.status === 'pending' && t.expiresAt > now && Number(t.amount) === amt
-    );
-    if (activeSession) {
+    const activeSession = getActivePendingTx(String(userId), platform);
+    if (activeSession && Number(activeSession.amount) === amt) {
       return res.json({
         sessionId: activeSession.id,
         platform: platform,
@@ -438,14 +469,10 @@ router.post('/init', (req, res) => {
     assignedAt: now,
     history: history
   };
-  writeJSON('assignments.json', assignmentsData);
+  saveAssignmentsData(assignmentsData);
 
   // Mark any old pending sessions as expired for this platform:user
-  transactions.forEach(t => {
-    if (t.userId === String(userId) && (t.platform || 'jember') === platform && t.status === 'pending') {
-      t.status = 'expired';
-    }
-  });
+  expireOldPendingTxs(String(userId), platform);
 
   const sessionId = uuidv4();
   const expiresAt = now + settings.sessionExpiry * 60 * 1000;
@@ -466,9 +493,7 @@ router.post('/init', (req, res) => {
     returnUrl: returnUrl || null,
     callbackUrl: callbackUrl || null,
   };
-  transactions.push(newTxObj);
-  writeJSON('transactions.json', transactions);
-  try { saveTx(newTxObj); } catch {}
+  saveTx(newTxObj);
 
   res.json({
     sessionId,
@@ -645,7 +670,7 @@ async function verifyWithVerifyEtMultiKey(settings, transactionId, targetPhoneNu
 }
 
 router.post('/verify', (req, res) => {
-  const { sessionId, transactionId, customVerifiedAmount } = req.body;
+  const { sessionId, transactionId } = req.body;
 
   if (!sessionId || !transactionId) {
     return res.status(400).json({ error: 'Missing sessionId or transactionId' });
@@ -656,30 +681,25 @@ router.post('/verify', (req, res) => {
     return res.status(400).json({ error: 'Invalid transaction ID format' });
   }
 
-  const transactions = readJSON('transactions.json') || [];
-
   // Anti-fraud duplicate check: 0.0001ms instant SQLite check!
   const alreadyUsed = getTxByCleanTxId(cleanTxId);
   if (alreadyUsed) {
     return res.status(400).json({ error: 'This transaction ID has already been verified and credited.' });
   }
 
-  const idx = transactions.findIndex(t => t.id === sessionId);
-
-  if (idx === -1) {
+  const tx = getTxById(sessionId);
+  if (!tx) {
     return res.status(404).json({ error: 'Session not found' });
   }
 
-  const tx = transactions[idx];
   const platform = tx.platform || 'jember';
 
   if (Date.now() > tx.expiresAt) {
-    transactions[idx].status = 'expired';
-    writeJSON('transactions.json', transactions);
+    updateTx(sessionId, { status: 'expired' });
 
-    if (transactions[idx].callbackUrl) {
-      const payload = createWebhookPayload(transactions[idx], 'expired', 0, {}, 'Session has expired');
-      sendWebhookWithRetry(transactions[idx].callbackUrl, payload);
+    if (tx.callbackUrl) {
+      const payload = createWebhookPayload(tx, 'expired', 0, {}, 'Session has expired');
+      sendWebhookWithRetry(tx.callbackUrl, payload);
     }
 
     return res.status(400).json({ error: 'Session has expired' });
@@ -689,10 +709,11 @@ router.post('/verify', (req, res) => {
     return res.status(400).json({ error: 'Transaction already submitted' });
   }
 
-  transactions[idx].transactionId = cleanTxId;
-  transactions[idx].status = 'processing';
-  transactions[idx].submittedAt = Date.now();
-  writeJSON('transactions.json', transactions);
+  updateTx(sessionId, {
+    transactionId: cleanTxId,
+    status: 'processing',
+    submittedAt: Date.now()
+  });
 
   const settings = getPlatformSettings(platform);
   const activePhones = getActivePhoneNumbers(platform);
@@ -703,83 +724,79 @@ router.post('/verify', (req, res) => {
     if (apiKey && apiKey.trim() && !apiKey.includes('_placeholder')) {
       // Call MultiKey Verify.ET algorithm
       const result = await verifyWithVerifyEtMultiKey(settings, cleanTxId, tx.phoneNumber, activePhones, platform);
+      const currentTx = getTxById(sessionId);
 
-      const currentTxs = readJSON('transactions.json') || [];
-      const tIdx = currentTxs.findIndex(t => t.id === sessionId);
-
-      if (tIdx !== -1) {
+      if (currentTx) {
         if (result.success && result.receipt) {
           const creditedAccountStr = result.receipt.creditedAccount || result.receipt.receiver;
           if (!matchesMaskedPhone(creditedAccountStr, activePhones)) {
             // Auto-reset to pending: user can retry without new session. No failed callback to Jember Bet.
-            currentTxs[tIdx].status = 'pending';
-            currentTxs[tIdx].transactionId = null;
-            currentTxs[tIdx].submittedAt = null;
-            currentTxs[tIdx].failReason = 'Transaction was not sent to an active deposit phone number. Please try again.';
-            writeJSON('transactions.json', currentTxs);
+            updateTx(sessionId, {
+              status: 'pending',
+              transactionId: null,
+              submittedAt: null,
+              failReason: 'Transaction was not sent to an active deposit phone number. Please try again.'
+            });
             return;
           }
 
           const rawAmt = result.receipt.amount || '0';
-          const parsedAmt = parseFloat(String(rawAmt).replace(/[^0-9.]/g, '')) || currentTxs[tIdx].amount;
+          const parsedAmt = parseFloat(String(rawAmt).replace(/[^0-9.]/g, '')) || currentTx.amount;
 
           const minDeposit = settings.minDeposit || 100;
           const maxDeposit = settings.maxDeposit || 50000;
 
           if (parsedAmt < minDeposit) {
-            // Auto-reset to pending: user can retry. No failed callback to Jember Bet.
-            currentTxs[tIdx].status = 'pending';
-            currentTxs[tIdx].transactionId = null;
-            currentTxs[tIdx].submittedAt = null;
-            currentTxs[tIdx].failReason = `Amount (${parsedAmt.toFixed(2)} ETB) is below the minimum deposit of ${minDeposit} ETB. Please try again.`;
-            writeJSON('transactions.json', currentTxs);
+            updateTx(sessionId, {
+              status: 'pending',
+              transactionId: null,
+              submittedAt: null,
+              failReason: `Amount (${parsedAmt.toFixed(2)} ETB) is below the minimum deposit of ${minDeposit} ETB. Please try again.`
+            });
             return;
           }
 
           if (parsedAmt > maxDeposit) {
-            // Auto-reset to pending: user can retry. No failed callback to Jember Bet.
-            currentTxs[tIdx].status = 'pending';
-            currentTxs[tIdx].transactionId = null;
-            currentTxs[tIdx].submittedAt = null;
-            currentTxs[tIdx].failReason = `Amount (${parsedAmt.toFixed(2)} ETB) exceeds the maximum deposit of ${maxDeposit} ETB.`;
-            writeJSON('transactions.json', currentTxs);
+            updateTx(sessionId, {
+              status: 'pending',
+              transactionId: null,
+              submittedAt: null,
+              failReason: `Amount (${parsedAmt.toFixed(2)} ETB) exceeds the maximum deposit of ${maxDeposit} ETB.`
+            });
             return;
           }
 
-          currentTxs[tIdx].amount = parsedAmt;
-          currentTxs[tIdx].verifiedAmount = parsedAmt;
-          currentTxs[tIdx].status = 'verified';
-          currentTxs[tIdx].failReason = null; // Always clear failReason on verified
-          currentTxs[tIdx].receipt = result.receipt;
-          writeJSON('transactions.json', currentTxs);
-          try { saveTx(currentTxs[tIdx]); } catch {}
+          const updatedTx = updateTx(sessionId, {
+            amount: parsedAmt,
+            verifiedAmount: parsedAmt,
+            status: 'verified',
+            failReason: null,
+            receipt: result.receipt
+          });
 
           // Webhook Callback with HMAC-SHA256 Signature Verification & Retries
-          if (currentTxs[tIdx].callbackUrl) {
-            const payload = createWebhookPayload(currentTxs[tIdx], 'verified', parsedAmt, result.receipt);
-            sendWebhookWithRetry(currentTxs[tIdx].callbackUrl, payload);
+          if (updatedTx && updatedTx.callbackUrl) {
+            const payload = createWebhookPayload(updatedTx, 'verified', parsedAmt, result.receipt);
+            sendWebhookWithRetry(updatedTx.callbackUrl, payload);
           }
         } else {
           // Verification failed on verify.et — auto-reset to pending so user can retry.
-          // NO failed callback sent to Jember Bet to avoid order closure on retryable errors.
-          currentTxs[tIdx].status = 'pending';
-          currentTxs[tIdx].transactionId = null;
-          currentTxs[tIdx].submittedAt = null;
-          currentTxs[tIdx].failReason = result.message || 'Invalid transaction ID or receipt not found. Please try again.';
-          writeJSON('transactions.json', currentTxs);
+          updateTx(sessionId, {
+            status: 'pending',
+            transactionId: null,
+            submittedAt: null,
+            failReason: result.message || 'Invalid transaction ID or receipt not found. Please try again.'
+          });
         }
       }
     } else {
       // If no valid API key is configured for this platform, reject verification immediately!
-      const currentTxs = readJSON('transactions.json') || [];
-      const tIdx = currentTxs.findIndex(t => t.id === sessionId);
-      if (tIdx !== -1) {
-        currentTxs[tIdx].status = 'pending';
-        currentTxs[tIdx].transactionId = null;
-        currentTxs[tIdx].submittedAt = null;
-        currentTxs[tIdx].failReason = 'Verification service is not configured for this platform. Please contact support.';
-        writeJSON('transactions.json', currentTxs);
-      }
+      updateTx(sessionId, {
+        status: 'pending',
+        transactionId: null,
+        submittedAt: null,
+        failReason: 'Verification service is not configured for this platform. Please contact support.'
+      });
     }
   })();
 
@@ -797,24 +814,18 @@ router.post('/fail', (req, res) => {
     return res.status(400).json({ error: 'Missing sessionId' });
   }
 
-  const transactions = readJSON('transactions.json') || [];
-  const idx = transactions.findIndex(t => t.id === sessionId);
-
-  if (idx !== -1) {
-    // Reset to pending so user can retry — no failed callback sent to Jember Bet
-    transactions[idx].status = 'pending';
-    transactions[idx].transactionId = null;
-    transactions[idx].submittedAt = null;
-    transactions[idx].failReason = reason || 'Verification timed out. Please try again.';
-    writeJSON('transactions.json', transactions);
-  }
+  updateTx(sessionId, {
+    status: 'pending',
+    transactionId: null,
+    submittedAt: null,
+    failReason: reason || 'Verification timed out. Please try again.'
+  });
 
   res.json({ success: true, status: 'pending' });
 });
 
 router.get('/session/:sessionId', (req, res) => {
-  const transactions = readJSON('transactions.json') || [];
-  const tx = transactions.find(t => t.id === req.params.sessionId);
+  const tx = getTxById(req.params.sessionId);
   if (!tx) return res.status(404).json({ error: 'Session not found' });
   const platform = tx.platform || 'jember';
   const settings = getPlatformSettings(platform);
@@ -839,8 +850,7 @@ router.get('/session/:sessionId', (req, res) => {
 });
 
 router.get('/status/:sessionId', (req, res) => {
-  const transactions = readJSON('transactions.json') || [];
-  const tx = transactions.find(t => t.id === req.params.sessionId);
+  const tx = getTxById(req.params.sessionId);
   if (!tx) return res.status(404).json({ error: 'Not found' });
   res.json({
     status: tx.status,
@@ -862,16 +872,11 @@ router.post('/reset', (req, res) => {
   const { sessionId } = req.body;
   if (!sessionId) return res.status(400).json({ error: 'Missing sessionId' });
 
-  const transactions = readJSON('transactions.json') || [];
-  const idx = transactions.findIndex(t => t.id === sessionId);
-
-  if (idx === -1) return res.status(404).json({ error: 'Session not found' });
-
-  const tx = transactions[idx];
+  const tx = getTxById(sessionId);
+  if (!tx) return res.status(404).json({ error: 'Session not found' });
 
   if (Date.now() > tx.expiresAt) {
-    transactions[idx].status = 'expired';
-    writeJSON('transactions.json', transactions);
+    updateTx(sessionId, { status: 'expired' });
     return res.status(400).json({ error: 'Session has expired' });
   }
 
@@ -880,21 +885,22 @@ router.post('/reset', (req, res) => {
     return res.status(400).json({ error: `Cannot reset a transaction with status: ${tx.status}` });
   }
 
-  transactions[idx].status = 'pending';
-  transactions[idx].transactionId = null;
-  transactions[idx].failReason = null;
-  transactions[idx].submittedAt = null;
-  writeJSON('transactions.json', transactions);
+  const updated = updateTx(sessionId, {
+    status: 'pending',
+    transactionId: null,
+    failReason: null,
+    submittedAt: null
+  });
 
   res.json({
     success: true,
     sessionId,
-    platform: tx.platform || 'jember',
+    platform: updated.platform || 'jember',
     status: 'pending',
-    expiresAt: tx.expiresAt,
-    phoneNumber: tx.phoneNumber,
-    amount: tx.amount,
-    requestedAmount: tx.requestedAmount,
+    expiresAt: updated.expiresAt,
+    phoneNumber: updated.phoneNumber,
+    amount: updated.amount,
+    requestedAmount: updated.requestedAmount,
   });
 });
 
