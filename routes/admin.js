@@ -223,27 +223,6 @@ const { getAllTxs, getStats, expireAllOldPendingTxs, db } = require('../db');
 
 function updateExpiredTransactions() {
   expireAllOldPendingTxs();
-
-  const transactions = readJSON('transactions.json') || [];
-  const now = Date.now();
-  let updated = false;
-
-  const newList = transactions.map(t => {
-    if (t.status === 'pending' && now > t.expiresAt) {
-      updated = true;
-      return { ...t, status: 'expired' };
-    }
-    if (t.status === 'processing' && t.submittedAt && (now - t.submittedAt > 15000)) {
-      updated = true;
-      return { ...t, status: 'failed', failReason: 'Verification failed' };
-    }
-    return t;
-  });
-
-  if (updated) {
-    writeJSON('transactions.json', newList);
-  }
-  return newList;
 }
 
 function getTxAmount(t) {
@@ -408,17 +387,14 @@ router.put('/numbers', requireAdminRole, (req, res) => {
     writeJSON('assignments.json', assignments);
   }
 
-  // 2. Immediately update pending transactions in transactions.json
-  const transactions = readJSON('transactions.json') || [];
-  let txChanged = false;
-  transactions.forEach(t => {
-    if ((t.platform || 'jember').toLowerCase() === p && t.status === 'pending' && t.phoneNumber && phoneMap[t.phoneNumber]) {
-      t.phoneNumber = phoneMap[t.phoneNumber];
-      txChanged = true;
+  // 2. Immediately update pending transactions in SQLite
+  try {
+    for (const [oldPhone, newPhone] of Object.entries(phoneMap)) {
+      db.prepare("UPDATE transactions SET phoneNumber = ? WHERE platform = ? AND status = 'pending' AND phoneNumber = ?")
+        .run(newPhone, p, oldPhone);
     }
-  });
-  if (txChanged) {
-    writeJSON('transactions.json', transactions);
+  } catch (err) {
+    console.error('Error updating pending phone numbers:', err.message);
   }
 
   res.json({ success: true, platform: p, updatedCount: Object.keys(phoneMap).length });
@@ -558,15 +534,7 @@ router.get('/assignments', (req, res) => {
 });
 
 router.delete('/transactions/clear-expired', (req, res) => {
-  const transactions = readJSON('transactions.json') || [];
-  const now = Date.now();
-  const updated = transactions.map(t => {
-    if (t.status === 'pending' && now > t.expiresAt) {
-      return { ...t, status: 'expired' };
-    }
-    return t;
-  });
-  writeJSON('transactions.json', updated);
+  expireAllOldPendingTxs();
   res.json({ success: true });
 });
 
