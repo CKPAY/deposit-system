@@ -71,6 +71,12 @@ try {
     db.exec(`ALTER TABLE transactions ADD COLUMN platform TEXT NOT NULL DEFAULT 'jember'`);
   }
   db.exec(`CREATE INDEX IF NOT EXISTS idx_platform ON transactions(platform)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_tx_platform_status ON transactions(platform, status)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_tx_user_plat_status ON transactions(userId, platform, status)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_tx_status_expires ON transactions(status, expiresAt)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_tx_status_submitted ON transactions(status, submittedAt)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_tx_plat_stat_created ON transactions(platform, status, createdAt)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_tx_plat_stat_phone ON transactions(platform, status, phoneNumber, createdAt)`);
 } catch (e) {
   console.error('Migration index notice:', e.message);
 }
@@ -154,6 +160,39 @@ function expireAllOldPendingTxs() {
   const now = Date.now();
   db.prepare(`UPDATE transactions SET status = 'expired' WHERE status = 'pending' AND expiresAt < ?`).run(now);
   db.prepare(`UPDATE transactions SET status = 'failed', failReason = 'Verification timeout' WHERE status = 'processing' AND submittedAt < ?`).run(now - 30000);
+}
+
+function updateTx(id, fields = {}) {
+  const keys = Object.keys(fields);
+  if (keys.length === 0) return getTxById(id);
+
+  const setClauses = [];
+  const params = [];
+
+  for (const k of keys) {
+    if (k === 'receipt' && typeof fields[k] === 'object' && fields[k] !== null) {
+      setClauses.push(`receipt = ?`);
+      params.push(JSON.stringify(fields[k]));
+    } else if (k === 'transactionId' && fields[k]) {
+      setClauses.push(`transactionId = ?`);
+      params.push(String(fields[k]).trim().toUpperCase());
+    } else {
+      setClauses.push(`${k} = ?`);
+      params.push(fields[k]);
+    }
+  }
+
+  params.push(id);
+  db.prepare(`UPDATE transactions SET ${setClauses.join(', ')} WHERE id = ?`).run(...params);
+  return getTxById(id);
+}
+
+function updatePendingTxPhone(platform, oldPhone, newPhone) {
+  if (!oldPhone || !newPhone) return;
+  db.prepare(`
+    UPDATE transactions SET phoneNumber = ?
+    WHERE platform = ? AND status = 'pending' AND phoneNumber = ?
+  `).run(newPhone, String(platform).toLowerCase(), oldPhone);
 }
 
 function getAllTxs(filters = {}) {
@@ -376,6 +415,8 @@ function getWithdrawalStats(platform = 'all', timestamps = {}) {
 module.exports = {
   db,
   saveTx,
+  updateTx,
+  updatePendingTxPhone,
   getTxById,
   getTxByCleanTxId,
   getActivePendingTx,
