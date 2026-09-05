@@ -511,7 +511,7 @@ function getApiKeyForPhone(phoneNumber, settings, platform = 'jember') {
 
 async function pollVerifyEtStatus(apiKey, requestId) {
   const statusUrl = `https://verify.et/api/verify/${requestId}`;
-  for (let attempt = 0; attempt < 6; attempt++) {
+  for (let attempt = 0; attempt < 8; attempt++) {
     await new Promise(resolve => setTimeout(resolve, 1500));
     try {
       const res = await fetch(statusUrl, {
@@ -519,24 +519,33 @@ async function pollVerifyEtStatus(apiKey, requestId) {
         signal: AbortSignal.timeout(6000),
       });
       const body = await res.json();
-      const item = body.data || {};
-      const status = item.processingStatus || item.status;
-      if (status === 'completed' || status === 'success' || item.verified === true) {
+      const rawItem = body.data || {};
+      const resObj = rawItem.result || rawItem;
+      const status = rawItem.processingStatus || rawItem.status || resObj.status;
+      const isVerified = rawItem.verified === true || resObj.verified === true || status === 'completed' || status === 'success';
+
+      if (isVerified && (resObj.amount || resObj.receiverAccount || rawItem.result)) {
+        const receiverAcc = resObj.receiverAccount || resObj.bankSpecific?.receiverAccount || resObj.creditedPartyAccountNo || rawItem.receiverAccount || '';
+        const amt = resObj.amount !== undefined ? resObj.amount : (resObj.amountValue !== undefined ? resObj.amountValue : (rawItem.amount || '0'));
+        const sender = resObj.senderName || resObj.payerName || rawItem.senderName || 'Telebirr Customer';
+        const receiver = resObj.receiverName || resObj.creditedPartyName || rawItem.receiverName || 'Merchant';
+        const txNum = resObj.transactionNumber || resObj.referenceNumber || resObj.receiptNumber || rawItem.transactionNumber || requestId;
+
         return {
           success: true,
           message: 'Transaction verified successfully.',
           receipt: {
-            transactionId: item.referenceNumber || item.transactionNumber || requestId,
+            transactionId: txNum,
             status: 'VERIFIED',
-            payer: item.senderName || item.payer || 'Telebirr Customer',
-            receiver: item.receiverName || item.receiver || 'Merchant',
-            amount: String(item.amount || '0'),
-            date: item.completedAt || new Date().toISOString(),
-            creditedAccount: item.receiverAccount || '',
+            payer: sender,
+            receiver: receiver,
+            amount: String(amt),
+            date: resObj.timestamp || rawItem.completedAt || new Date().toISOString(),
+            creditedAccount: receiverAcc,
           }
         };
       }
-      if (status === 'failed' || item.verified === false) {
+      if (status === 'failed' || rawItem.verified === false) {
         return {
           success: false,
           message: body.message || 'Transaction verification failed on verify.et.'
@@ -579,27 +588,34 @@ async function verifyWithVerifyEt(apiKey, transactionId) {
       };
     }
 
-    const item = (Array.isArray(data.data) && data.data.length > 0) ? data.data[0] : (data.data || {});
-    const isVerified = item.verified === true || item.status === 'success' || data.verification?.verified === true;
+    const rawData = (Array.isArray(data.data) && data.data.length > 0) ? data.data[0] : (data.data || {});
+    const resObj = rawData.result || rawData;
+    const isVerified = rawData.verified === true || resObj.verified === true || rawData.status === 'success' || resObj.status === 'success' || data.verification?.verified === true;
 
     if (!isVerified) {
       return {
         success: false,
-        message: data.message || item.message || 'Transaction not found or verification failed.',
+        message: data.message || rawData.message || resObj.message || 'Transaction not found or verification failed.',
       };
     }
+
+    const receiverAcc = resObj.receiverAccount || resObj.bankSpecific?.receiverAccount || resObj.creditedPartyAccountNo || rawData.receiverAccount || '';
+    const amt = resObj.amount !== undefined ? resObj.amount : (resObj.amountValue !== undefined ? resObj.amountValue : (rawData.amount || '0'));
+    const sender = resObj.senderName || resObj.payerName || rawData.senderName || 'Telebirr Customer';
+    const receiver = resObj.receiverName || resObj.creditedPartyName || rawData.receiverName || 'Merchant';
+    const txNum = resObj.transactionNumber || resObj.referenceNumber || resObj.receiptNumber || rawData.transactionNumber || transactionId;
 
     return {
       success: true,
       message: 'Transaction verified successfully.',
       receipt: {
-        transactionId: item.referenceNumber || item.transactionNumber || transactionId,
+        transactionId: txNum,
         status: 'VERIFIED',
-        payer: item.senderName || item.payer || 'Telebirr Customer',
-        receiver: item.receiverName || item.receiver || 'Merchant',
-        amount: String(item.amount || '0'),
-        date: item.timestamp || item.date || new Date().toISOString(),
-        creditedAccount: item.receiverAccount || item.creditedAccount || '',
+        payer: sender,
+        receiver: receiver,
+        amount: String(amt),
+        date: resObj.timestamp || rawData.date || new Date().toISOString(),
+        creditedAccount: receiverAcc,
       },
     };
   } catch (err) {
@@ -634,10 +650,14 @@ async function verifyWithVerifyEtMultiKey(settings, transactionId, targetPhoneNu
   for (const key of keysToTry) {
     if (!key || key.includes('_placeholder')) continue;
 
+    console.log('[Verify] Trying key on Verify.ET for tx:', transactionId);
     const result = await verifyWithVerifyEt(key, transactionId);
+    console.log('[Verify] Result from verifyWithVerifyEt:', result.success, result.message, result.receipt?.creditedAccount);
     if (result.success && result.receipt) {
       const credited = result.receipt.creditedAccount || result.receipt.receiver;
-      if (matchesMaskedPhone(credited, activePhones)) {
+      const isMatch = matchesMaskedPhone(credited, activePhones);
+      console.log('[Verify] Masked phone match:', credited, 'against activePhones:', isMatch);
+      if (isMatch) {
         return result;
       }
     }
@@ -703,12 +723,14 @@ router.post('/verify', (req, res) => {
   (async () => {
     if (apiKey && apiKey.trim() && !apiKey.includes('_placeholder')) {
       const result = await verifyWithVerifyEtMultiKey(settings, cleanTxId, tx.phoneNumber, activePhones, platform);
+      console.log('[Verify Route] Outcome:', result.success, result.message, result.receipt);
       const currentTx = getTxById(sessionId);
 
       if (currentTx) {
         if (result.success && result.receipt) {
           const creditedAccountStr = result.receipt.creditedAccount || result.receipt.receiver;
           if (!matchesMaskedPhone(creditedAccountStr, activePhones)) {
+            console.log('[Verify Route] Reject: not matching activePhones:', creditedAccountStr);
             updateTxStatus(sessionId, 'pending', {
               transactionId: null,
               submittedAt: null,
