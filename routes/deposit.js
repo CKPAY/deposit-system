@@ -545,10 +545,10 @@ async function pollVerifyEtStatus(apiKey, requestId) {
           }
         };
       }
-      if (status === 'failed' || rawItem.verified === false) {
+      if (status === 'failed' || resObj.status === 'failed') {
         return {
           success: false,
-          message: body.message || 'Transaction verification failed on verify.et.'
+          message: resObj.message || body.message || 'Transaction verification failed on verify.et.'
         };
       }
     } catch {}
@@ -662,6 +662,14 @@ async function verifyWithVerifyEtMultiKey(settings, transactionId, targetPhoneNu
       }
     }
     lastResult = result;
+  }
+
+  if (lastResult && lastResult.message && /credit|balance|insufficient/i.test(lastResult.message)) {
+    return {
+      success: false,
+      message: lastResult.message,
+      code: 'INSUFFICIENT_CREDITS'
+    };
   }
 
   return {
