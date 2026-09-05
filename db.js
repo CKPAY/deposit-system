@@ -131,18 +131,70 @@ function getTxByCleanTxId(txId) {
   };
 }
 
-function getActivePendingTx(userId, platform = 'jember') {
-  const now = Date.now();
-  const row = db.prepare(`
-    SELECT * FROM transactions
-    WHERE userId = ? AND platform = ? AND status = 'pending' AND expiresAt > ?
-    ORDER BY createdAt DESC LIMIT 1
-  `).get(String(userId), String(platform).toLowerCase(), now);
+function getTxByOrderId(orderId) {
+  if (!orderId) return null;
+  const row = db.prepare(`SELECT * FROM transactions WHERE orderId = ? ORDER BY createdAt DESC LIMIT 1`).get(String(orderId));
   if (!row) return null;
   return {
     ...row,
     receipt: row.receipt ? JSON.parse(row.receipt) : null,
   };
+}
+
+function getActivePendingTx(userId, platform = 'jember', amount = null) {
+  const now = Date.now();
+  let sql = `SELECT * FROM transactions WHERE userId = ? AND platform = ? AND status = 'pending' AND expiresAt > ?`;
+  const params = [String(userId), String(platform).toLowerCase(), now];
+  if (amount) {
+    sql += ` AND amount = ?`;
+    params.push(Number(amount));
+  }
+  sql += ` ORDER BY createdAt DESC LIMIT 1`;
+  const row = db.prepare(sql).get(...params);
+  if (!row) return null;
+  return {
+    ...row,
+    receipt: row.receipt ? JSON.parse(row.receipt) : null,
+  };
+}
+
+function updateTxStatus(id, status, updates = {}) {
+  const fields = ['status = ?'];
+  const params = [status];
+
+  if (updates.transactionId !== undefined) {
+    fields.push('transactionId = ?');
+    params.push(updates.transactionId ? String(updates.transactionId).trim().toUpperCase() : null);
+  }
+  if (updates.failReason !== undefined) {
+    fields.push('failReason = ?');
+    params.push(updates.failReason || null);
+  }
+  if (updates.submittedAt !== undefined) {
+    fields.push('submittedAt = ?');
+    params.push(updates.submittedAt ? Number(updates.submittedAt) : null);
+  }
+  if (updates.verifiedAmount !== undefined) {
+    fields.push('verifiedAmount = ?');
+    params.push(updates.verifiedAmount !== null ? Number(updates.verifiedAmount) : null);
+  }
+  if (updates.amount !== undefined) {
+    fields.push('amount = ?');
+    params.push(Number(updates.amount));
+  }
+  if (updates.receipt !== undefined) {
+    fields.push('receipt = ?');
+    params.push(updates.receipt ? (typeof updates.receipt === 'string' ? updates.receipt : JSON.stringify(updates.receipt)) : null);
+  }
+  if (updates.phoneNumber !== undefined) {
+    fields.push('phoneNumber = ?');
+    params.push(String(updates.phoneNumber));
+  }
+
+  params.push(String(id));
+  const sql = `UPDATE transactions SET ${fields.join(', ')} WHERE id = ?`;
+  db.prepare(sql).run(...params);
+  return getTxById(id);
 }
 
 function expireOldPendingTxs(userId, platform = 'jember') {
@@ -377,8 +429,10 @@ module.exports = {
   db,
   saveTx,
   getTxById,
+  getTxByOrderId,
   getTxByCleanTxId,
   getActivePendingTx,
+  updateTxStatus,
   expireOldPendingTxs,
   expireAllOldPendingTxs,
   getAllTxs,
