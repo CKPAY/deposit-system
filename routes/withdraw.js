@@ -164,7 +164,7 @@ router.post(['/init', '/request'], (req, res) => {
   const userId = req.body.userId || req.body.account_id || tokenPayload.userId || tokenPayload.id || tokenPayload.account_id;
   const amount = Number(req.body.amount || tokenPayload.amount);
   const rawPhone = req.body.phoneNumber || req.body.phone || tokenPayload.phoneNumber || tokenPayload.phone;
-  const orderId = req.body.orderId || req.body.order_id || tokenPayload.orderId || tokenPayload.order_id || null;
+  const orderId = req.body.orderId || req.body.order_id || req.body.orderID || req.body.OrderId || req.body.reference || req.body.refId || tokenPayload.orderId || tokenPayload.order_id || tokenPayload.orderID || null;
 
   if (!userId || !amount || isNaN(amount) || amount <= 0) {
     return res.status(400).json({ error: 'Invalid withdrawal parameters (missing userId or amount)' });
