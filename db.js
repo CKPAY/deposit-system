@@ -334,6 +334,14 @@ function getWithdrawalById(id) {
   return db.prepare(`SELECT * FROM withdrawals WHERE id = ?`).get(id) || null;
 }
 
+function getWithdrawalByOrderId(orderId, platform = null) {
+  if (!orderId) return null;
+  if (platform) {
+    return db.prepare(`SELECT * FROM withdrawals WHERE orderId = ? AND platform = ?`).get(String(orderId), String(platform).toLowerCase()) || null;
+  }
+  return db.prepare(`SELECT * FROM withdrawals WHERE orderId = ?`).get(String(orderId)) || null;
+}
+
 function updateWithdrawalStatus(id, status, { transactionId = null, rejectReason = null, processedBy = null } = {}) {
   const now = Date.now();
   db.prepare(`
@@ -439,6 +447,7 @@ module.exports = {
   getStats,
   saveWithdrawal,
   getWithdrawalById,
+  getWithdrawalByOrderId,
   updateWithdrawalStatus,
   getAllWithdrawals,
   getWithdrawalStats,
