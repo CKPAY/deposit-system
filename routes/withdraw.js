@@ -8,6 +8,7 @@ const crypto = require('crypto');
 const {
   saveWithdrawal,
   getWithdrawalById,
+  getWithdrawalByOrderId,
   updateWithdrawalStatus,
   getAllWithdrawals,
   getWithdrawalStats
@@ -172,6 +173,18 @@ router.post(['/init', '/request'], (req, res) => {
   const phone = normalizePhone(rawPhone);
   if (!phone || !/^0[97]\d{8}$/.test(phone)) {
     return res.status(400).json({ error: 'Please provide a valid 10-digit Ethiopian mobile number (09... or 07...)' });
+  }
+
+  // Duplicate orderId check to prevent double-payouts
+  if (orderId) {
+    const existing = getWithdrawalByOrderId(orderId, platform);
+    if (existing) {
+      return res.status(409).json({
+        error: `Duplicate orderId: A withdrawal with orderId '${orderId}' already exists (${existing.status})`,
+        sessionId: existing.id,
+        status: existing.status
+      });
+    }
   }
 
   const defaultReturnUrl = platform === 'bravobirr'
