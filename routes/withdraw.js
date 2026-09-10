@@ -127,7 +127,9 @@ function getEthiopianTimeMidnightTimestamps() {
 router.post(['/init', '/request'], (req, res) => {
   let tokenPayload = {};
   let detectedPlatform = null;
-  const rawToken = req.body.token || req.headers['x-ckpay-token'] || null;
+  const authHeader = req.headers['authorization'] || '';
+  const bearerToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : null;
+  const rawToken = req.body.token || req.headers['x-ckpay-token'] || req.headers['x-api-key'] || bearerToken || req.query.token || null;
 
   if (rawToken) {
     const raw = readJSON('settings.json') || {};
@@ -144,8 +146,33 @@ router.post(['/init', '/request'], (req, res) => {
     }
 
     if (!detectedPlatform) {
-      try { tokenPayload = jwt.decode(rawToken) || {}; } catch {}
-      return res.status(401).json({ error: 'Invalid or expired withdrawal token.' });
+      // Check if rawToken is actually the raw Secret Key directly
+      const raw = readJSON('settings.json') || {};
+      const configuredPlatforms = Object.keys(raw.platforms || {});
+      const allPlatforms = Array.from(new Set(['jember', 'bravobirr', 'abay', ...configuredPlatforms]));
+      for (const plat of allPlatforms) {
+        if (getPlatformSecret(plat) === String(rawToken).trim()) {
+          detectedPlatform = plat;
+          break;
+        }
+      }
+      if (!detectedPlatform) {
+        try { tokenPayload = jwt.decode(rawToken) || {}; } catch {}
+        return res.status(401).json({ error: 'Invalid or expired withdrawal token / secret key.' });
+      }
+    }
+  }
+
+  const directSecret = req.headers['x-secret-key'] || req.body.secretKey || req.body.apiKey || req.body.secret || null;
+  if (directSecret && !detectedPlatform) {
+    const raw = readJSON('settings.json') || {};
+    const configuredPlatforms = Object.keys(raw.platforms || {});
+    const allPlatforms = Array.from(new Set(['jember', 'bravobirr', 'abay', ...configuredPlatforms]));
+    for (const plat of allPlatforms) {
+      if (getPlatformSecret(plat) === String(directSecret).trim()) {
+        detectedPlatform = plat;
+        break;
+      }
     }
   }
 
