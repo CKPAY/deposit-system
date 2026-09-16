@@ -771,7 +771,9 @@ router.post('/verify', (req, res) => {
             return;
           }
 
+          const verifiedTxId = cleanTxId || (result.receipt && (result.receipt.transactionId || result.receipt.receiptNumber)) || null;
           const updatedTx = updateTxStatus(sessionId, 'verified', {
+            transactionId: verifiedTxId,
             amount: parsedAmt,
             verifiedAmount: parsedAmt,
             failReason: null,
