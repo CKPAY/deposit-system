@@ -64,7 +64,7 @@ function createWithdrawWebhookPayload(w, status, secret) {
     orderId: orderId,
     amount: amount,
     phoneNumber: w.phoneNumber,
-    transactionId: w.transactionId || null,
+    // transactionId is omitted from partner webhook callbacks (stays private in CK-PAY admin)
     rejectReason: w.rejectReason || null,
     processedBy: w.processedBy || null,
     platform: w.platform,
@@ -222,6 +222,7 @@ router.post(['/init', '/request'], (req, res) => {
 
   const finalReturnUrl = returnUrl || defaultReturnUrl;
 
+  const assignedAgent = getNextAssignedAgent(platform);
   const sessionId = uuidv4();
   const newWithdrawal = {
     id: sessionId,
@@ -234,6 +235,7 @@ router.post(['/init', '/request'], (req, res) => {
     rejectReason: null,
     processedBy: null,
     platform: platform,
+    assignedAgent: assignedAgent,
     createdAt: Date.now(),
     processedAt: null,
     returnUrl: finalReturnUrl,
@@ -250,11 +252,47 @@ router.post(['/init', '/request'], (req, res) => {
     phoneNumber: newWithdrawal.phoneNumber,
     status: newWithdrawal.status,
     platform: newWithdrawal.platform,
+    assignedAgent: newWithdrawal.assignedAgent,
     createdAt: newWithdrawal.createdAt,
     returnUrl: newWithdrawal.returnUrl,
     callbackUrl: newWithdrawal.callbackUrl,
   });
 });
+
+// Round-Robin Agent Selector per platform
+const roundRobinIndex = {};
+function getNextAssignedAgent(platform) {
+  const p = String(platform || 'jember').toLowerCase();
+  const settings = readJSON('settings.json') || {};
+  const users = settings.adminUsers || [];
+
+  // Find all agents who have access to this platform
+  const eligibleAgents = users.filter(u => {
+    if ((u.role || '').toLowerCase() !== 'agent') return false;
+    const platforms = (Array.isArray(u.platforms) && u.platforms.length > 0)
+      ? u.platforms.map(pl => String(pl).toLowerCase())
+      : ['jember', 'bravobirr', 'abay'];
+    return platforms.includes(p);
+  });
+
+  if (eligibleAgents.length === 0) {
+    return null;
+  }
+
+  if (eligibleAgents.length === 1) {
+    return eligibleAgents[0].username;
+  }
+
+  // Round-robin alternation across eligible agents
+  if (roundRobinIndex[p] === undefined || roundRobinIndex[p] === null) {
+    roundRobinIndex[p] = 0;
+  } else {
+    roundRobinIndex[p] = (roundRobinIndex[p] + 1) % eligibleAgents.length;
+  }
+
+  const selected = eligibleAgents[roundRobinIndex[p] % eligibleAgents.length];
+  return selected ? selected.username : eligibleAgents[0].username;
+}
 
 router.get('/session/:sessionId', (req, res) => {
   const { sessionId } = req.params;
@@ -308,20 +346,71 @@ function requireStaffAuth(req, res, next) {
 
 router.get('/list', requireStaffAuth, (req, res) => {
   const { platform, status, search } = req.query;
-  const rows = getAllWithdrawals({ platform, status, search });
+  const session = req.adminSession;
+  const filters = { platform, status, search };
+
+  if (session && session.isAgent && !session.isSuperAdmin) {
+    // 1 agent only sees withdrawals assigned to them
+    filters.assignedAgent = session.username;
+
+    // And only for platforms assigned to this agent
+    const allowedPlatforms = (Array.isArray(session.platforms) && session.platforms.length > 0)
+      ? session.platforms.map(p => String(p).toLowerCase())
+      : ['jember', 'bravobirr', 'abay'];
+
+    if (!platform || platform === 'all') {
+      filters.platforms = allowedPlatforms;
+      delete filters.platform;
+    } else {
+      if (!allowedPlatforms.includes(String(platform).toLowerCase())) {
+        return res.json([]);
+      }
+    }
+  }
+
+  const rows = getAllWithdrawals(filters);
   res.json(rows);
 });
 
 router.get('/stats', requireStaffAuth, (req, res) => {
   const platform = req.query.platform || 'all';
+  const session = req.adminSession;
   const timestamps = getEthiopianTimeMidnightTimestamps();
-  const stats = getWithdrawalStats(platform, timestamps);
+
+  const options = {};
+  if (session && session.isAgent && !session.isSuperAdmin) {
+    options.assignedAgent = session.username;
+    const allowedPlatforms = (Array.isArray(session.platforms) && session.platforms.length > 0)
+      ? session.platforms.map(p => String(p).toLowerCase())
+      : ['jember', 'bravobirr', 'abay'];
+
+    if (!platform || platform === 'all') {
+      options.platforms = allowedPlatforms;
+    } else {
+      if (!allowedPlatforms.includes(String(platform).toLowerCase())) {
+        return res.json({
+          platform,
+          total: 0, pendingCount: 0, processingCount: 0, completedCount: 0, rejectedCount: 0,
+          totalPaidETB: 0, todayPaidETB: 0, weekPaidETB: 0, monthPaidETB: 0,
+          todayCount: 0, weekCount: 0, monthCount: 0
+        });
+      }
+    }
+  }
+
+  const stats = getWithdrawalStats(platform, timestamps, options);
   res.json(stats);
 });
 
 router.post('/approve', requireStaffAuth, (req, res) => {
   const { sessionId, transactionId } = req.body;
   if (!sessionId) return res.status(400).json({ error: 'Missing sessionId' });
+
+  // Telebirr Transaction ID is mandatory
+  const cleanTxId = transactionId ? String(transactionId).trim().toUpperCase() : '';
+  if (!cleanTxId) {
+    return res.status(400).json({ error: 'Transaction ID is required to confirm payout.' });
+  }
 
   const w = getWithdrawalById(sessionId);
   if (!w) return res.status(404).json({ error: 'Withdrawal not found' });
@@ -330,8 +419,16 @@ router.post('/approve', requireStaffAuth, (req, res) => {
   }
 
   const agentUsername = req.adminSession.username || 'agent';
+  const isSuper = req.adminSession.isSuperAdmin;
+  const isAgent = req.adminSession.isAgent && !isSuper;
+
+  // Enforce agent assignment lock: agent cannot approve someone else's assigned withdrawal
+  if (isAgent && w.assignedAgent && w.assignedAgent.toLowerCase() !== agentUsername.toLowerCase()) {
+    return res.status(403).json({ error: `Access denied: This withdrawal is assigned to ${w.assignedAgent}.` });
+  }
+
   const updated = updateWithdrawalStatus(sessionId, 'completed', {
-    transactionId: transactionId ? String(transactionId).trim().toUpperCase() : `TB_MANUAL_${Date.now()}`,
+    transactionId: cleanTxId,
     processedBy: agentUsername
   });
 
@@ -359,6 +456,13 @@ router.post('/reject', requireStaffAuth, (req, res) => {
   }
 
   const agentUsername = req.adminSession.username || 'agent';
+  const isSuper = req.adminSession.isSuperAdmin;
+  const isAgent = req.adminSession.isAgent && !isSuper;
+
+  if (isAgent && w.assignedAgent && w.assignedAgent.toLowerCase() !== agentUsername.toLowerCase()) {
+    return res.status(403).json({ error: `Access denied: This withdrawal is assigned to ${w.assignedAgent}.` });
+  }
+
   const reason = rejectReason ? String(rejectReason).trim() : 'Rejected by payout agent';
 
   const updated = updateWithdrawalStatus(sessionId, 'rejected', {
