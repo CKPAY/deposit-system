@@ -123,7 +123,8 @@ function getTxById(id) {
 function getTxByCleanTxId(txId) {
   if (!txId) return null;
   const clean = String(txId).trim().toUpperCase();
-  const row = db.prepare(`SELECT * FROM transactions WHERE UPPER(transactionId) = ? AND status = 'verified'`).get(clean);
+  // Block if already verified OR currently being processed to eliminate race conditions/double credits
+  const row = db.prepare(`SELECT * FROM transactions WHERE UPPER(transactionId) = ? AND status IN ('verified', 'processing')`).get(clean);
   if (!row) return null;
   return {
     ...row,
@@ -143,7 +144,8 @@ function getTxByOrderId(orderId) {
 
 function getActivePendingTx(userId, platform = 'jember', amount = null) {
   const now = Date.now();
-  let sql = `SELECT * FROM transactions WHERE userId = ? AND platform = ? AND status = 'pending' AND expiresAt > ?`;
+  // Include both pending AND processing transactions so browser refresh preserves the session
+  let sql = `SELECT * FROM transactions WHERE userId = ? AND platform = ? AND status IN ('pending', 'processing') AND expiresAt > ?`;
   const params = [String(userId), String(platform).toLowerCase(), now];
   if (amount) {
     sql += ` AND amount = ?`;
