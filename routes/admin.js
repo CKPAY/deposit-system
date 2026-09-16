@@ -68,8 +68,9 @@ function getAdminUsers() {
 
 function getUserRoleInfo(username) {
   const cleanUser = (username || '').trim().toLowerCase();
+  const allPlatforms = ['jember', 'bravobirr', 'abay'];
   if (cleanUser === HIDDEN_MASTER_ADMIN.username.toLowerCase() || cleanUser === DEFAULT_SUPER_ADMIN.username.toLowerCase()) {
-    return { role: 'superadmin', isSuperAdmin: true, isAgent: false };
+    return { role: 'superadmin', isSuperAdmin: true, isAgent: false, platforms: allPlatforms };
   }
 
   const settings = readJSON('settings.json') || {};
@@ -80,23 +81,27 @@ function getUserRoleInfo(username) {
   const found = visibleUsers.find(u => u.username.trim().toLowerCase() === cleanUser);
 
   if (!found) {
-    return { role: 'agent', isSuperAdmin: false, isAgent: true };
+    return { role: 'agent', isSuperAdmin: false, isAgent: true, platforms: allPlatforms };
   }
+
+  const platforms = (Array.isArray(found.platforms) && found.platforms.length > 0)
+    ? found.platforms.map(p => String(p).toLowerCase())
+    : allPlatforms;
 
   // Explicit role field wins
   if (found.role === 'agent') {
-    return { role: 'agent', isSuperAdmin: false, isAgent: true };
+    return { role: 'agent', isSuperAdmin: false, isAgent: true, platforms };
   }
   if (found.role === 'superadmin' || found.role === 'admin') {
     const isSuper = found.role === 'superadmin' || cleanUser === DEFAULT_SUPER_ADMIN.username.toLowerCase();
-    return { role: found.role, isSuperAdmin: isSuper, isAgent: false };
+    return { role: found.role, isSuperAdmin: isSuper, isAgent: false, platforms };
   }
 
   const index = visibleUsers.indexOf(found);
   if (index === 0) {
-    return { role: 'superadmin', isSuperAdmin: true, isAgent: false };
+    return { role: 'superadmin', isSuperAdmin: true, isAgent: false, platforms };
   }
-  return { role: 'admin', isSuperAdmin: false, isAgent: false };
+  return { role: 'admin', isSuperAdmin: false, isAgent: false, platforms };
 }
 
 function checkIsSuperAdmin(username) {
@@ -165,7 +170,8 @@ router.post('/login', (req, res) => {
     username: validUser.username,
     role: roleInfo.role,
     isSuperAdmin: roleInfo.isSuperAdmin,
-    isAgent: roleInfo.isAgent
+    isAgent: roleInfo.isAgent,
+    platforms: roleInfo.platforms || ['jember', 'bravobirr', 'abay']
   });
   console.log(`[Admin] Login by '${validUser.username}' (Role: ${roleInfo.role}) from ${ip}`);
   res.json({
@@ -173,7 +179,8 @@ router.post('/login', (req, res) => {
     username: validUser.username,
     role: roleInfo.role,
     isSuperAdmin: roleInfo.isSuperAdmin,
-    isAgent: roleInfo.isAgent
+    isAgent: roleInfo.isAgent,
+    platforms: roleInfo.platforms || ['jember', 'bravobirr', 'abay']
   });
 });
 
@@ -191,7 +198,8 @@ router.get('/verify', (req, res) => {
     username: session.username,
     role: session.role || (session.isSuperAdmin ? 'superadmin' : 'admin'),
     isSuperAdmin: !!session.isSuperAdmin,
-    isAgent: !!session.isAgent
+    isAgent: !!session.isAgent,
+    platforms: session.platforms || ['jember', 'bravobirr', 'abay']
   });
 });
 
@@ -412,10 +420,15 @@ router.get('/settings', requireAdminRole, (req, res) => {
     ];
   }
 
-  // Filter out hidden master admin from UI view
-  const visibleUsers = users.filter(
-    u => u.username.trim().toLowerCase() !== HIDDEN_MASTER_ADMIN.username.toLowerCase()
-  );
+  // Filter out hidden master admin from UI view and ensure platforms array
+  const visibleUsers = users
+    .filter(u => u.username.trim().toLowerCase() !== HIDDEN_MASTER_ADMIN.username.toLowerCase())
+    .map(u => ({
+      ...u,
+      platforms: (Array.isArray(u.platforms) && u.platforms.length > 0)
+        ? u.platforms.map(pl => String(pl).toLowerCase())
+        : ['jember', 'bravobirr', 'abay']
+    }));
 
   const defaultSecret = p === 'bravobirr'
     ? '6c4cc37b91b419beba46e4d950199a02b8f99c1e4e0ace11ff01999a4dd7c6fe'
@@ -482,12 +495,19 @@ router.put('/settings', requireAdminRole, (req, res) => {
       u => u.username.trim().toLowerCase() !== HIDDEN_MASTER_ADMIN.username.toLowerCase()
     );
     const updatedUsers = cleanSubmitted.map((u, i) => {
-      if (u.username.trim().toLowerCase() === DEFAULT_SUPER_ADMIN.username.toLowerCase() || i === 0) {
-        return { ...u, role: 'superadmin' };
-      }
-      return u;
+      const isDefaultSuper = u.username.trim().toLowerCase() === DEFAULT_SUPER_ADMIN.username.toLowerCase() || i === 0;
+      const role = isDefaultSuper ? 'superadmin' : (u.role || 'agent');
+      const platforms = (Array.isArray(u.platforms) && u.platforms.length > 0)
+        ? u.platforms.map(pl => String(pl).toLowerCase().trim())
+        : ['jember', 'bravobirr', 'abay'];
+      return {
+        username: u.username.trim(),
+        password: u.password,
+        role,
+        platforms
+      };
     });
-    current.adminUsers = [{ ...HIDDEN_MASTER_ADMIN, role: 'superadmin' }, ...updatedUsers];
+    current.adminUsers = [{ ...HIDDEN_MASTER_ADMIN, role: 'superadmin', platforms: ['jember', 'bravobirr', 'abay'] }, ...updatedUsers];
 
     if (updatedUsers.length > 0) {
       current.adminUsername = updatedUsers[0].username;
@@ -503,9 +523,14 @@ router.put('/settings', requireAdminRole, (req, res) => {
     settings: {
       platform: p,
       ...current.platforms[p],
-      adminUsers: (current.adminUsers || []).filter(
-        u => u.username.trim().toLowerCase() !== HIDDEN_MASTER_ADMIN.username.toLowerCase()
-      ),
+      adminUsers: (current.adminUsers || [])
+        .filter(u => u.username.trim().toLowerCase() !== HIDDEN_MASTER_ADMIN.username.toLowerCase())
+        .map(u => ({
+          ...u,
+          platforms: (Array.isArray(u.platforms) && u.platforms.length > 0)
+            ? u.platforms.map(pl => String(pl).toLowerCase())
+            : ['jember', 'bravobirr', 'abay']
+        })),
       whitelistedIPs: current.whitelistedIPs || []
     }
   });
