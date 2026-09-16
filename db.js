@@ -54,7 +54,8 @@ db.exec(`
     createdAt INTEGER NOT NULL,
     processedAt INTEGER,
     returnUrl TEXT,
-    callbackUrl TEXT
+    callbackUrl TEXT,
+    assignedAgent TEXT
   );
 
   CREATE INDEX IF NOT EXISTS idx_w_status ON withdrawals(status);
@@ -71,6 +72,13 @@ try {
     db.exec(`ALTER TABLE transactions ADD COLUMN platform TEXT NOT NULL DEFAULT 'jember'`);
   }
   db.exec(`CREATE INDEX IF NOT EXISTS idx_platform ON transactions(platform)`);
+
+  const wTableInfo = db.prepare(`PRAGMA table_info(withdrawals)`).all();
+  const hasAssignedAgent = wTableInfo.some(col => col.name === 'assignedAgent');
+  if (!hasAssignedAgent) {
+    db.exec(`ALTER TABLE withdrawals ADD COLUMN assignedAgent TEXT`);
+  }
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_w_assignedAgent ON withdrawals(assignedAgent)`);
 } catch (e) {
   console.error('Migration index notice:', e.message);
 }
@@ -303,11 +311,11 @@ const stmtInsertWithdrawal = db.prepare(`
   INSERT OR REPLACE INTO withdrawals (
     id, orderId, userId, amount, phoneNumber, status,
     transactionId, rejectReason, processedBy, platform,
-    createdAt, processedAt, returnUrl, callbackUrl
+    createdAt, processedAt, returnUrl, callbackUrl, assignedAgent
   ) VALUES (
     @id, @orderId, @userId, @amount, @phoneNumber, @status,
     @transactionId, @rejectReason, @processedBy, @platform,
-    @createdAt, @processedAt, @returnUrl, @callbackUrl
+    @createdAt, @processedAt, @returnUrl, @callbackUrl, @assignedAgent
   )
 `);
 
@@ -327,6 +335,7 @@ function saveWithdrawal(w) {
     processedAt: w.processedAt ? Number(w.processedAt) : null,
     returnUrl: w.returnUrl || null,
     callbackUrl: w.callbackUrl || null,
+    assignedAgent: w.assignedAgent ? String(w.assignedAgent).trim() : null,
   };
   stmtInsertWithdrawal.run(row);
   return row;
@@ -344,7 +353,7 @@ function getWithdrawalByOrderId(orderId, platform = null) {
   return db.prepare(`SELECT * FROM withdrawals WHERE orderId = ?`).get(String(orderId)) || null;
 }
 
-function updateWithdrawalStatus(id, status, { transactionId = null, rejectReason = null, processedBy = null } = {}) {
+function updateWithdrawalStatus(id, status, { transactionId = null, rejectReason = null, processedBy = null, assignedAgent = null } = {}) {
   const now = Date.now();
   db.prepare(`
     UPDATE withdrawals
@@ -352,9 +361,10 @@ function updateWithdrawalStatus(id, status, { transactionId = null, rejectReason
         transactionId = COALESCE(?, transactionId),
         rejectReason = COALESCE(?, rejectReason),
         processedBy = COALESCE(?, processedBy),
+        assignedAgent = COALESCE(?, assignedAgent),
         processedAt = ?
     WHERE id = ?
-  `).run(status, transactionId, rejectReason, processedBy, now, id);
+  `).run(status, transactionId, rejectReason, processedBy, assignedAgent, now, id);
   return getWithdrawalById(id);
 }
 
@@ -363,7 +373,16 @@ function getAllWithdrawals(filters = {}) {
   const conditions = [];
   const params = [];
 
-  if (filters.platform && filters.platform !== 'all') {
+  if (filters.assignedAgent) {
+    conditions.push(`assignedAgent = ?`);
+    params.push(String(filters.assignedAgent).trim());
+  }
+
+  if (Array.isArray(filters.platforms) && filters.platforms.length > 0) {
+    const placeholders = filters.platforms.map(() => '?').join(', ');
+    conditions.push(`platform IN (${placeholders})`);
+    params.push(...filters.platforms.map(p => String(p).toLowerCase()));
+  } else if (filters.platform && filters.platform !== 'all') {
     conditions.push(`platform = ?`);
     params.push(String(filters.platform).toLowerCase());
   }
@@ -374,9 +393,9 @@ function getAllWithdrawals(filters = {}) {
   }
 
   if (filters.search) {
-    conditions.push(`(userId LIKE ? OR phoneNumber LIKE ? OR transactionId LIKE ? OR orderId LIKE ? OR id LIKE ?)`);
+    conditions.push(`(userId LIKE ? OR phoneNumber LIKE ? OR transactionId LIKE ? OR orderId LIKE ? OR id LIKE ? OR assignedAgent LIKE ?)`);
     const term = `%${filters.search}%`;
-    params.push(term, term, term, term, term);
+    params.push(term, term, term, term, term, term);
   }
 
   if (conditions.length > 0) {
@@ -387,14 +406,25 @@ function getAllWithdrawals(filters = {}) {
   return db.prepare(sql).all(...params);
 }
 
-function getWithdrawalStats(platform = 'all', timestamps = {}) {
-  let whereClause = '';
+function getWithdrawalStats(platform = 'all', timestamps = {}, { assignedAgent = null, platforms = null } = {}) {
+  const conditions = [];
   const params = [];
 
-  if (platform && platform !== 'all') {
-    whereClause = ' WHERE platform = ?';
+  if (assignedAgent) {
+    conditions.push('assignedAgent = ?');
+    params.push(String(assignedAgent).trim());
+  }
+
+  if (Array.isArray(platforms) && platforms.length > 0) {
+    const placeholders = platforms.map(() => '?').join(', ');
+    conditions.push(`platform IN (${placeholders})`);
+    params.push(...platforms.map(p => String(p).toLowerCase()));
+  } else if (platform && platform !== 'all') {
+    conditions.push('platform = ?');
     params.push(String(platform).toLowerCase());
   }
+
+  const whereClause = conditions.length > 0 ? (' WHERE ' + conditions.join(' AND ')) : '';
 
   const todayStart = Number(timestamps.todayStart) || 0;
   const weekStart = Number(timestamps.weekStart) || 0;
