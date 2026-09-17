@@ -423,11 +423,8 @@ router.post('/approve', requireStaffAuth, (req, res) => {
   const { sessionId, transactionId } = req.body;
   if (!sessionId) return res.status(400).json({ error: 'Missing sessionId' });
 
-  // Telebirr Transaction ID is mandatory
-  const cleanTxId = transactionId ? String(transactionId).trim().toUpperCase() : '';
-  if (!cleanTxId) {
-    return res.status(400).json({ error: 'Transaction ID is required to confirm payout.' });
-  }
+  // Telebirr Transaction ID (optional for today)
+  const cleanTxId = (transactionId && String(transactionId).trim()) ? String(transactionId).trim().toUpperCase() : 'MANUAL';
 
   const w = getWithdrawalById(sessionId);
   if (!w) return res.status(404).json({ error: 'Withdrawal not found' });
