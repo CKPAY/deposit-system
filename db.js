@@ -355,6 +355,7 @@ function getWithdrawalByOrderId(orderId, platform = null) {
 
 function updateWithdrawalStatus(id, status, { transactionId = null, rejectReason = null, processedBy = null, assignedAgent = null } = {}) {
   const now = Date.now();
+  const cleanTxId = transactionId ? String(transactionId).trim().toUpperCase() : null;
   db.prepare(`
     UPDATE withdrawals
     SET status = ?,
@@ -364,7 +365,7 @@ function updateWithdrawalStatus(id, status, { transactionId = null, rejectReason
         assignedAgent = COALESCE(?, assignedAgent),
         processedAt = ?
     WHERE id = ?
-  `).run(status, transactionId, rejectReason, processedBy, assignedAgent, now, id);
+  `).run(status, cleanTxId, rejectReason, processedBy, assignedAgent, now, id);
   return getWithdrawalById(id);
 }
 
