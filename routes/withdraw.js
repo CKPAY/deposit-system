@@ -460,10 +460,9 @@ router.post('/reject', requireStaffAuth, (req, res) => {
 
   const agentUsername = req.adminSession.username || 'agent';
   const isSuper = req.adminSession.isSuperAdmin;
-  const isAgent = req.adminSession.isAgent && !isSuper;
 
-  if (isAgent && w.assignedAgent && w.assignedAgent.toLowerCase() !== agentUsername.toLowerCase()) {
-    return res.status(403).json({ error: `Access denied: This withdrawal is assigned to ${w.assignedAgent}.` });
+  if (!isSuper) {
+    return res.status(403).json({ error: 'Permission denied: Only Super Admins can cancel withdrawals.' });
   }
 
   const reason = rejectReason ? String(rejectReason).trim() : 'Rejected by payout agent';
