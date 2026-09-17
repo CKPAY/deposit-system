@@ -12,8 +12,13 @@ app.use(express.json());
 
 app.use('/api/deposit', depositRoutes);
 app.use('/api/withdraw', withdrawRoutes);
+app.use('/api/withdrawal', withdrawRoutes);
+app.use('/api/payout', withdrawRoutes);
 app.use('/api/v1/payment', depositRoutes);
 app.use('/api/v1/invoice', depositRoutes);
+app.use('/api/v1/withdraw', withdrawRoutes);
+app.use('/api/v1/withdrawal', withdrawRoutes);
+app.use('/api/v1/payout', withdrawRoutes);
 app.use('/api/admin', adminRoutes);
 
 const PORT = process.env.PORT || 3001;
