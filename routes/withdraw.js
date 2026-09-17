@@ -124,7 +124,7 @@ function getEthiopianTimeMidnightTimestamps() {
 
 // ─── PUBLIC / SERVER-TO-SERVER WITHDRAWAL ROUTES ─────────────────────────────
 
-router.post(['/init', '/request'], (req, res) => {
+router.post(['/', '/init', '/request', '/create', '/payout'], (req, res) => {
   let tokenPayload = {};
   let detectedPlatform = null;
   const authHeader = req.headers['authorization'] || '';
@@ -245,6 +245,9 @@ router.post(['/init', '/request'], (req, res) => {
   saveWithdrawal(newWithdrawal);
 
   res.json({
+    code: 200,
+    success: true,
+    message: 'Withdrawal initiated successfully',
     sessionId: newWithdrawal.id,
     orderId: newWithdrawal.orderId,
     userId: newWithdrawal.userId,
