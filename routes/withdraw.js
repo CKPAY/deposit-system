@@ -348,9 +348,16 @@ function requireStaffAuth(req, res, next) {
 }
 
 router.get('/list', requireStaffAuth, (req, res) => {
-  const { platform, status, search } = req.query;
+  const { platform, status, search, timeRange } = req.query;
   const session = req.adminSession;
   const filters = { platform, status, search };
+
+  if (timeRange && timeRange !== 'all') {
+    const timestamps = getEthiopianTimeMidnightTimestamps();
+    if (timeRange === 'today') filters.sinceTimestamp = timestamps.todayStart;
+    else if (timeRange === 'week') filters.sinceTimestamp = timestamps.weekStart;
+    else if (timeRange === 'month') filters.sinceTimestamp = timestamps.monthStart;
+  }
 
   if (session && session.isAgent && !session.isSuperAdmin) {
     // 1 agent only sees withdrawals assigned to them
@@ -377,10 +384,17 @@ router.get('/list', requireStaffAuth, (req, res) => {
 
 router.get('/stats', requireStaffAuth, (req, res) => {
   const platform = req.query.platform || 'all';
+  const timeRange = req.query.timeRange || 'all';
   const session = req.adminSession;
   const timestamps = getEthiopianTimeMidnightTimestamps();
 
   const options = {};
+  if (timeRange && timeRange !== 'all') {
+    if (timeRange === 'today') options.sinceTimestamp = timestamps.todayStart;
+    else if (timeRange === 'week') options.sinceTimestamp = timestamps.weekStart;
+    else if (timeRange === 'month') options.sinceTimestamp = timestamps.monthStart;
+  }
+
   if (session && session.isAgent && !session.isSuperAdmin) {
     options.assignedAgent = session.username;
     const allowedPlatforms = (Array.isArray(session.platforms) && session.platforms.length > 0)
