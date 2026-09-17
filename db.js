@@ -375,8 +375,13 @@ function getAllWithdrawals(filters = {}) {
   const params = [];
 
   if (filters.assignedAgent) {
-    conditions.push(`assignedAgent = ?`);
-    params.push(String(filters.assignedAgent).trim());
+    conditions.push(`(LOWER(assignedAgent) = LOWER(?) OR LOWER(processedBy) = LOWER(?))`);
+    params.push(String(filters.assignedAgent).trim(), String(filters.assignedAgent).trim());
+  }
+
+  if (filters.sinceTimestamp) {
+    conditions.push(`(createdAt >= ? OR (processedAt IS NOT NULL AND processedAt >= ?))`);
+    params.push(Number(filters.sinceTimestamp), Number(filters.sinceTimestamp));
   }
 
   if (Array.isArray(filters.platforms) && filters.platforms.length > 0) {
@@ -407,13 +412,13 @@ function getAllWithdrawals(filters = {}) {
   return db.prepare(sql).all(...params);
 }
 
-function getWithdrawalStats(platform = 'all', timestamps = {}, { assignedAgent = null, platforms = null } = {}) {
+function getWithdrawalStats(platform = 'all', timestamps = {}, { assignedAgent = null, platforms = null, sinceTimestamp = null } = {}) {
   const conditions = [];
   const params = [];
 
   if (assignedAgent) {
-    conditions.push('assignedAgent = ?');
-    params.push(String(assignedAgent).trim());
+    conditions.push(`(LOWER(assignedAgent) = LOWER(?) OR LOWER(processedBy) = LOWER(?))`);
+    params.push(String(assignedAgent).trim(), String(assignedAgent).trim());
   }
 
   if (Array.isArray(platforms) && platforms.length > 0) {
@@ -431,13 +436,17 @@ function getWithdrawalStats(platform = 'all', timestamps = {}, { assignedAgent =
   const weekStart = Number(timestamps.weekStart) || 0;
   const monthStart = Number(timestamps.monthStart) || 0;
 
+  const timeFilterClause = sinceTimestamp
+    ? `AND (createdAt >= ${Number(sinceTimestamp)} OR (processedAt IS NOT NULL AND processedAt >= ${Number(sinceTimestamp)}))`
+    : '';
+
   const sql = `
     SELECT
       COUNT(*) as total,
-      COUNT(CASE WHEN status = 'pending' THEN 1 END) as pendingCount,
-      COUNT(CASE WHEN status = 'processing' THEN 1 END) as processingCount,
-      COUNT(CASE WHEN status = 'completed' THEN 1 END) as completedCount,
-      COUNT(CASE WHEN status = 'rejected' THEN 1 END) as rejectedCount,
+      COUNT(CASE WHEN status = 'pending' ${timeFilterClause} THEN 1 END) as pendingCount,
+      COUNT(CASE WHEN status = 'processing' ${timeFilterClause} THEN 1 END) as processingCount,
+      COUNT(CASE WHEN status = 'completed' ${timeFilterClause} THEN 1 END) as completedCount,
+      COUNT(CASE WHEN status = 'rejected' ${timeFilterClause} THEN 1 END) as rejectedCount,
       SUM(CASE WHEN status = 'completed' THEN amount ELSE 0 END) as totalPaidETB,
       SUM(CASE WHEN status = 'completed' AND processedAt >= ${todayStart} THEN amount ELSE 0 END) as todayPaidETB,
       SUM(CASE WHEN status = 'completed' AND processedAt >= ${weekStart} THEN amount ELSE 0 END) as weekPaidETB,
