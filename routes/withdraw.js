@@ -269,9 +269,11 @@ function getNextAssignedAgent(platform) {
   const settings = readJSON('settings.json') || {};
   const users = settings.adminUsers || [];
 
-  // Find all agents who have access to this platform
+  // Find all active agents who have access to this platform
   const eligibleAgents = users.filter(u => {
     if ((u.role || '').toLowerCase() !== 'agent') return false;
+    // Exclude deactivated / OFF agents
+    if (u.active === false || u.isActive === false) return false;
     const platforms = (Array.isArray(u.platforms) && u.platforms.length > 0)
       ? u.platforms.map(pl => String(pl).toLowerCase())
       : ['jember', 'bravobirr', 'abay'];
@@ -341,6 +343,16 @@ function requireStaffAuth(req, res, next) {
   const session = adminModule.activeSessions ? adminModule.activeSessions.get(token) : null;
   if (!session || Date.now() > session.expiresAt) {
     return res.status(401).json({ error: 'Invalid or expired session' });
+  }
+
+  // Always refresh latest role, active status, and platforms from settings.json
+  if (session.username && adminModule.getUserRoleInfo) {
+    const roleInfo = adminModule.getUserRoleInfo(session.username);
+    session.role = roleInfo.role;
+    session.isSuperAdmin = roleInfo.isSuperAdmin;
+    session.isAgent = roleInfo.isAgent;
+    session.active = roleInfo.active !== false;
+    session.platforms = roleInfo.platforms || ['jember', 'bravobirr', 'abay'];
   }
 
   req.adminSession = session;
@@ -435,6 +447,11 @@ router.post('/approve', requireStaffAuth, (req, res) => {
   const agentUsername = req.adminSession.username || 'agent';
   const isSuper = req.adminSession.isSuperAdmin;
   const isAgent = req.adminSession.isAgent && !isSuper;
+
+  // Enforce active agent check: inactive/OFF agents cannot confirm payouts
+  if (isAgent && req.adminSession.active === false) {
+    return res.status(403).json({ error: 'Your agent account has been turned OFF by the administrator.' });
+  }
 
   // Enforce agent assignment lock: agent cannot approve someone else's assigned withdrawal
   if (isAgent && w.assignedAgent && w.assignedAgent.toLowerCase() !== agentUsername.toLowerCase()) {
