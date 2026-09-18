@@ -420,7 +420,7 @@ router.get('/stats', requireStaffAuth, (req, res) => {
 });
 
 router.post('/approve', requireStaffAuth, (req, res) => {
-  const { sessionId, transactionId } = req.body;
+  const { sessionId, transactionId, receiptImage } = req.body;
   if (!sessionId) return res.status(400).json({ error: 'Missing sessionId' });
 
   // Telebirr Transaction ID (optional for today)
@@ -441,9 +441,32 @@ router.post('/approve', requireStaffAuth, (req, res) => {
     return res.status(403).json({ error: `Access denied: This withdrawal is assigned to ${w.assignedAgent}.` });
   }
 
+  // Enforce mandatory receipt screenshot
+  if (!receiptImage || typeof receiptImage !== 'string' || !receiptImage.trim()) {
+    return res.status(400).json({ error: 'A transfer screenshot is required to confirm this withdrawal.' });
+  }
+
+  // Save receipt image to disk
+  let savedReceiptUrl = null;
+  try {
+    const receiptsDir = path.join(dataDir, 'receipts');
+    if (!fs.existsSync(receiptsDir)) {
+      fs.mkdirSync(receiptsDir, { recursive: true });
+    }
+    const base64Data = receiptImage.replace(/^data:image\/\w+;base64,/, '');
+    const buffer = Buffer.from(base64Data, 'base64');
+    const filename = `${sessionId}.jpg`;
+    fs.writeFileSync(path.join(receiptsDir, filename), buffer);
+    savedReceiptUrl = `/api/withdraw/receipt/${sessionId}`;
+  } catch (err) {
+    console.error('Failed to save receipt image:', err.message);
+    return res.status(500).json({ error: 'Failed to process and save transfer screenshot.' });
+  }
+
   const updated = updateWithdrawalStatus(sessionId, 'completed', {
     transactionId: cleanTxId,
-    processedBy: agentUsername
+    processedBy: agentUsername,
+    receiptImage: savedReceiptUrl
   });
 
   if (updated.callbackUrl) {
@@ -457,6 +480,30 @@ router.post('/approve', requireStaffAuth, (req, res) => {
     message: `Withdrawal approved by ${agentUsername}`,
     withdrawal: updated
   });
+});
+
+// Serve receipt image for preview in admin/agent terminal
+router.get('/receipt/:sessionId', (req, res) => {
+  const { sessionId } = req.params;
+  const safeId = String(sessionId).replace(/[^a-zA-Z0-9_-]/g, '');
+  const filePath = path.join(dataDir, 'receipts', `${safeId}.jpg`);
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).send('Receipt screenshot not found');
+  }
+  res.setHeader('Content-Type', 'image/jpeg');
+  res.setHeader('Cache-Control', 'public, max-age=86400');
+  res.sendFile(filePath);
+});
+
+// Download receipt image directly to gallery/device
+router.get('/receipt/:sessionId/download', (req, res) => {
+  const { sessionId } = req.params;
+  const safeId = String(sessionId).replace(/[^a-zA-Z0-9_-]/g, '');
+  const filePath = path.join(dataDir, 'receipts', `${safeId}.jpg`);
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).send('Receipt screenshot not found');
+  }
+  res.download(filePath, `telebirr_receipt_${safeId}.jpg`);
 });
 
 router.post('/reject', requireStaffAuth, (req, res) => {
