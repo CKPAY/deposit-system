@@ -55,7 +55,8 @@ db.exec(`
     processedAt INTEGER,
     returnUrl TEXT,
     callbackUrl TEXT,
-    assignedAgent TEXT
+    assignedAgent TEXT,
+    receiptImage TEXT
   );
 
   CREATE INDEX IF NOT EXISTS idx_w_status ON withdrawals(status);
@@ -77,6 +78,10 @@ try {
   const hasAssignedAgent = wTableInfo.some(col => col.name === 'assignedAgent');
   if (!hasAssignedAgent) {
     db.exec(`ALTER TABLE withdrawals ADD COLUMN assignedAgent TEXT`);
+  }
+  const hasReceiptImage = wTableInfo.some(col => col.name === 'receiptImage');
+  if (!hasReceiptImage) {
+    db.exec(`ALTER TABLE withdrawals ADD COLUMN receiptImage TEXT`);
   }
   db.exec(`CREATE INDEX IF NOT EXISTS idx_w_assignedAgent ON withdrawals(assignedAgent)`);
 } catch (e) {
@@ -311,11 +316,11 @@ const stmtInsertWithdrawal = db.prepare(`
   INSERT OR REPLACE INTO withdrawals (
     id, orderId, userId, amount, phoneNumber, status,
     transactionId, rejectReason, processedBy, platform,
-    createdAt, processedAt, returnUrl, callbackUrl, assignedAgent
+    createdAt, processedAt, returnUrl, callbackUrl, assignedAgent, receiptImage
   ) VALUES (
     @id, @orderId, @userId, @amount, @phoneNumber, @status,
     @transactionId, @rejectReason, @processedBy, @platform,
-    @createdAt, @processedAt, @returnUrl, @callbackUrl, @assignedAgent
+    @createdAt, @processedAt, @returnUrl, @callbackUrl, @assignedAgent, @receiptImage
   )
 `);
 
@@ -336,6 +341,7 @@ function saveWithdrawal(w) {
     returnUrl: w.returnUrl || null,
     callbackUrl: w.callbackUrl || null,
     assignedAgent: w.assignedAgent ? String(w.assignedAgent).trim() : null,
+    receiptImage: w.receiptImage || null,
   };
   stmtInsertWithdrawal.run(row);
   return row;
@@ -353,7 +359,7 @@ function getWithdrawalByOrderId(orderId, platform = null) {
   return db.prepare(`SELECT * FROM withdrawals WHERE orderId = ?`).get(String(orderId)) || null;
 }
 
-function updateWithdrawalStatus(id, status, { transactionId = null, rejectReason = null, processedBy = null, assignedAgent = null } = {}) {
+function updateWithdrawalStatus(id, status, { transactionId = null, rejectReason = null, processedBy = null, assignedAgent = null, receiptImage = null } = {}) {
   const now = Date.now();
   const cleanTxId = transactionId ? String(transactionId).trim().toUpperCase() : null;
   db.prepare(`
@@ -363,9 +369,10 @@ function updateWithdrawalStatus(id, status, { transactionId = null, rejectReason
         rejectReason = COALESCE(?, rejectReason),
         processedBy = COALESCE(?, processedBy),
         assignedAgent = COALESCE(?, assignedAgent),
+        receiptImage = COALESCE(?, receiptImage),
         processedAt = ?
     WHERE id = ?
-  `).run(status, cleanTxId, rejectReason, processedBy, assignedAgent, now, id);
+  `).run(status, cleanTxId, rejectReason, processedBy, assignedAgent, receiptImage, now, id);
   return getWithdrawalById(id);
 }
 
