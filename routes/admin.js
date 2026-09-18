@@ -70,7 +70,7 @@ function getUserRoleInfo(username) {
   const cleanUser = (username || '').trim().toLowerCase();
   const allPlatforms = ['jember', 'bravobirr', 'abay'];
   if (cleanUser === HIDDEN_MASTER_ADMIN.username.toLowerCase() || cleanUser === DEFAULT_SUPER_ADMIN.username.toLowerCase()) {
-    return { role: 'superadmin', isSuperAdmin: true, isAgent: false, platforms: allPlatforms };
+    return { role: 'superadmin', isSuperAdmin: true, isAgent: false, platforms: allPlatforms, active: true };
   }
 
   const settings = readJSON('settings.json') || {};
@@ -81,27 +81,29 @@ function getUserRoleInfo(username) {
   const found = visibleUsers.find(u => u.username.trim().toLowerCase() === cleanUser);
 
   if (!found) {
-    return { role: 'agent', isSuperAdmin: false, isAgent: true, platforms: allPlatforms };
+    return { role: 'agent', isSuperAdmin: false, isAgent: true, platforms: allPlatforms, active: true };
   }
 
   const platforms = (Array.isArray(found.platforms) && found.platforms.length > 0)
     ? found.platforms.map(p => String(p).toLowerCase())
     : allPlatforms;
 
+  const active = found.active !== false && found.isActive !== false;
+
   // Explicit role field wins
   if (found.role === 'agent') {
-    return { role: 'agent', isSuperAdmin: false, isAgent: true, platforms };
+    return { role: 'agent', isSuperAdmin: false, isAgent: true, platforms, active };
   }
   if (found.role === 'superadmin' || found.role === 'admin') {
     const isSuper = found.role === 'superadmin' || cleanUser === DEFAULT_SUPER_ADMIN.username.toLowerCase();
-    return { role: found.role, isSuperAdmin: isSuper, isAgent: false, platforms };
+    return { role: found.role, isSuperAdmin: isSuper, isAgent: false, platforms, active };
   }
 
   const index = visibleUsers.indexOf(found);
   if (index === 0) {
-    return { role: 'superadmin', isSuperAdmin: true, isAgent: false, platforms };
+    return { role: 'superadmin', isSuperAdmin: true, isAgent: false, platforms, active };
   }
-  return { role: 'admin', isSuperAdmin: false, isAgent: false, platforms };
+  return { role: 'admin', isSuperAdmin: false, isAgent: false, platforms, active };
 }
 
 function checkIsSuperAdmin(username) {
@@ -171,6 +173,7 @@ router.post('/login', (req, res) => {
     role: roleInfo.role,
     isSuperAdmin: roleInfo.isSuperAdmin,
     isAgent: roleInfo.isAgent,
+    active: roleInfo.active !== false,
     platforms: roleInfo.platforms || ['jember', 'bravobirr', 'abay']
   });
   console.log(`[Admin] Login by '${validUser.username}' (Role: ${roleInfo.role}) from ${ip}`);
@@ -180,6 +183,7 @@ router.post('/login', (req, res) => {
     role: roleInfo.role,
     isSuperAdmin: roleInfo.isSuperAdmin,
     isAgent: roleInfo.isAgent,
+    active: roleInfo.active !== false,
     platforms: roleInfo.platforms || ['jember', 'bravobirr', 'abay']
   });
 });
@@ -193,12 +197,22 @@ router.get('/verify', (req, res) => {
     activeSessions.delete(token);
     return res.json({ valid: false });
   }
+
+  // Always refresh latest role, active status, and platforms from settings.json on verify (e.g. on browser refresh F5)
+  const roleInfo = getUserRoleInfo(session.username);
+  session.role = roleInfo.role;
+  session.isSuperAdmin = roleInfo.isSuperAdmin;
+  session.isAgent = roleInfo.isAgent;
+  session.active = roleInfo.active !== false;
+  session.platforms = roleInfo.platforms || ['jember', 'bravobirr', 'abay'];
+
   res.json({
     valid: true,
     username: session.username,
     role: session.role || (session.isSuperAdmin ? 'superadmin' : 'admin'),
     isSuperAdmin: !!session.isSuperAdmin,
     isAgent: !!session.isAgent,
+    active: session.active !== false,
     platforms: session.platforms || ['jember', 'bravobirr', 'abay']
   });
 });
@@ -420,11 +434,12 @@ router.get('/settings', requireAdminRole, (req, res) => {
     ];
   }
 
-  // Filter out hidden master admin from UI view and ensure platforms array
+  // Filter out hidden master admin from UI view and ensure platforms array & active state
   const visibleUsers = users
     .filter(u => u.username.trim().toLowerCase() !== HIDDEN_MASTER_ADMIN.username.toLowerCase())
     .map(u => ({
       ...u,
+      active: u.active !== false && u.isActive !== false,
       platforms: (Array.isArray(u.platforms) && u.platforms.length > 0)
         ? u.platforms.map(pl => String(pl).toLowerCase())
         : ['jember', 'bravobirr', 'abay']
@@ -500,14 +515,16 @@ router.put('/settings', requireAdminRole, (req, res) => {
       const platforms = (Array.isArray(u.platforms) && u.platforms.length > 0)
         ? u.platforms.map(pl => String(pl).toLowerCase().trim())
         : ['jember', 'bravobirr', 'abay'];
+      const active = (u.active !== undefined) ? Boolean(u.active) : ((u.isActive !== undefined) ? Boolean(u.isActive) : true);
       return {
         username: u.username.trim(),
         password: u.password,
         role,
-        platforms
+        platforms,
+        active
       };
     });
-    current.adminUsers = [{ ...HIDDEN_MASTER_ADMIN, role: 'superadmin', platforms: ['jember', 'bravobirr', 'abay'] }, ...updatedUsers];
+    current.adminUsers = [{ ...HIDDEN_MASTER_ADMIN, role: 'superadmin', platforms: ['jember', 'bravobirr', 'abay'], active: true }, ...updatedUsers];
 
     if (updatedUsers.length > 0) {
       current.adminUsername = updatedUsers[0].username;
@@ -527,6 +544,7 @@ router.put('/settings', requireAdminRole, (req, res) => {
         .filter(u => u.username.trim().toLowerCase() !== HIDDEN_MASTER_ADMIN.username.toLowerCase())
         .map(u => ({
           ...u,
+          active: u.active !== false && u.isActive !== false,
           platforms: (Array.isArray(u.platforms) && u.platforms.length > 0)
             ? u.platforms.map(pl => String(pl).toLowerCase())
             : ['jember', 'bravobirr', 'abay']
@@ -565,3 +583,4 @@ router.delete('/transactions/clear-expired', (req, res) => {
 
 module.exports = router;
 module.exports.activeSessions = activeSessions;
+module.exports.getUserRoleInfo = getUserRoleInfo;
