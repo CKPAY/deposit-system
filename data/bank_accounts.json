@@ -1,0 +1,482 @@
+{
+  "jember": {
+    "cbe": [
+      {
+        "id": 1,
+        "account": "",
+        "label": "CBE Account 1",
+        "active": true
+      },
+      {
+        "id": 2,
+        "account": "",
+        "label": "CBE Account 2",
+        "active": true
+      },
+      {
+        "id": 3,
+        "account": "",
+        "label": "CBE Account 3",
+        "active": true
+      },
+      {
+        "id": 4,
+        "account": "",
+        "label": "CBE Account 4",
+        "active": true
+      },
+      {
+        "id": 5,
+        "account": "",
+        "label": "CBE Account 5",
+        "active": true
+      }
+    ],
+    "boa": [
+      {
+        "id": 1,
+        "account": "",
+        "label": "BoA Account 1",
+        "active": true
+      },
+      {
+        "id": 2,
+        "account": "",
+        "label": "BoA Account 2",
+        "active": true
+      },
+      {
+        "id": 3,
+        "account": "",
+        "label": "BoA Account 3",
+        "active": true
+      },
+      {
+        "id": 4,
+        "account": "",
+        "label": "BoA Account 4",
+        "active": true
+      },
+      {
+        "id": 5,
+        "account": "",
+        "label": "BoA Account 5",
+        "active": true
+      }
+    ],
+    "cbebirr": [
+      {
+        "id": 1,
+        "account": "",
+        "label": "CBE Birr 1",
+        "active": true
+      },
+      {
+        "id": 2,
+        "account": "",
+        "label": "CBE Birr 2",
+        "active": true
+      },
+      {
+        "id": 3,
+        "account": "",
+        "label": "CBE Birr 3",
+        "active": true
+      }
+    ],
+    "awash": [
+      {
+        "id": 1,
+        "account": "",
+        "label": "Awash Account 1",
+        "active": true
+      },
+      {
+        "id": 2,
+        "account": "",
+        "label": "Awash Account 2",
+        "active": true
+      },
+      {
+        "id": 3,
+        "account": "",
+        "label": "Awash Account 3",
+        "active": true
+      }
+    ],
+    "dashen": [
+      {
+        "id": 1,
+        "account": "",
+        "label": "Dashen Account 1",
+        "active": true
+      },
+      {
+        "id": 2,
+        "account": "",
+        "label": "Dashen Account 2",
+        "active": true
+      },
+      {
+        "id": 3,
+        "account": "",
+        "label": "Dashen Account 3",
+        "active": true
+      }
+    ],
+    "mpesa": [
+      {
+        "id": 1,
+        "account": "",
+        "label": "M-Pesa 1",
+        "active": true
+      },
+      {
+        "id": 2,
+        "account": "",
+        "label": "M-Pesa 2",
+        "active": true
+      },
+      {
+        "id": 3,
+        "account": "",
+        "label": "M-Pesa 3",
+        "active": true
+      }
+    ],
+    "siinqee": [
+      {
+        "id": 1,
+        "account": "",
+        "label": "Siinqee Account 1",
+        "active": true
+      },
+      {
+        "id": 2,
+        "account": "",
+        "label": "Siinqee Account 2",
+        "active": true
+      }
+    ]
+  },
+  "bravobirr": {
+    "cbe": [
+      {
+        "id": 1,
+        "account": "",
+        "label": "CBE Account 1",
+        "active": true
+      },
+      {
+        "id": 2,
+        "account": "",
+        "label": "CBE Account 2",
+        "active": true
+      },
+      {
+        "id": 3,
+        "account": "",
+        "label": "CBE Account 3",
+        "active": true
+      },
+      {
+        "id": 4,
+        "account": "",
+        "label": "CBE Account 4",
+        "active": true
+      },
+      {
+        "id": 5,
+        "account": "",
+        "label": "CBE Account 5",
+        "active": true
+      }
+    ],
+    "boa": [
+      {
+        "id": 1,
+        "account": "",
+        "label": "BoA Account 1",
+        "active": true
+      },
+      {
+        "id": 2,
+        "account": "",
+        "label": "BoA Account 2",
+        "active": true
+      },
+      {
+        "id": 3,
+        "account": "",
+        "label": "BoA Account 3",
+        "active": true
+      },
+      {
+        "id": 4,
+        "account": "",
+        "label": "BoA Account 4",
+        "active": true
+      },
+      {
+        "id": 5,
+        "account": "",
+        "label": "BoA Account 5",
+        "active": true
+      }
+    ],
+    "cbebirr": [
+      {
+        "id": 1,
+        "account": "",
+        "label": "CBE Birr 1",
+        "active": true
+      },
+      {
+        "id": 2,
+        "account": "",
+        "label": "CBE Birr 2",
+        "active": true
+      },
+      {
+        "id": 3,
+        "account": "",
+        "label": "CBE Birr 3",
+        "active": true
+      }
+    ],
+    "awash": [
+      {
+        "id": 1,
+        "account": "",
+        "label": "Awash Account 1",
+        "active": true
+      },
+      {
+        "id": 2,
+        "account": "",
+        "label": "Awash Account 2",
+        "active": true
+      },
+      {
+        "id": 3,
+        "account": "",
+        "label": "Awash Account 3",
+        "active": true
+      }
+    ],
+    "dashen": [
+      {
+        "id": 1,
+        "account": "",
+        "label": "Dashen Account 1",
+        "active": true
+      },
+      {
+        "id": 2,
+        "account": "",
+        "label": "Dashen Account 2",
+        "active": true
+      },
+      {
+        "id": 3,
+        "account": "",
+        "label": "Dashen Account 3",
+        "active": true
+      }
+    ],
+    "mpesa": [
+      {
+        "id": 1,
+        "account": "",
+        "label": "M-Pesa 1",
+        "active": true
+      },
+      {
+        "id": 2,
+        "account": "",
+        "label": "M-Pesa 2",
+        "active": true
+      },
+      {
+        "id": 3,
+        "account": "",
+        "label": "M-Pesa 3",
+        "active": true
+      }
+    ],
+    "siinqee": [
+      {
+        "id": 1,
+        "account": "",
+        "label": "Siinqee Account 1",
+        "active": true
+      },
+      {
+        "id": 2,
+        "account": "",
+        "label": "Siinqee Account 2",
+        "active": true
+      }
+    ]
+  },
+  "abay": {
+    "cbe": [
+      {
+        "id": 1,
+        "account": "",
+        "label": "CBE Account 1",
+        "active": true
+      },
+      {
+        "id": 2,
+        "account": "",
+        "label": "CBE Account 2",
+        "active": true
+      },
+      {
+        "id": 3,
+        "account": "",
+        "label": "CBE Account 3",
+        "active": true
+      },
+      {
+        "id": 4,
+        "account": "",
+        "label": "CBE Account 4",
+        "active": true
+      },
+      {
+        "id": 5,
+        "account": "",
+        "label": "CBE Account 5",
+        "active": true
+      }
+    ],
+    "boa": [
+      {
+        "id": 1,
+        "account": "",
+        "label": "BoA Account 1",
+        "active": true
+      },
+      {
+        "id": 2,
+        "account": "",
+        "label": "BoA Account 2",
+        "active": true
+      },
+      {
+        "id": 3,
+        "account": "",
+        "label": "BoA Account 3",
+        "active": true
+      },
+      {
+        "id": 4,
+        "account": "",
+        "label": "BoA Account 4",
+        "active": true
+      },
+      {
+        "id": 5,
+        "account": "",
+        "label": "BoA Account 5",
+        "active": true
+      }
+    ],
+    "cbebirr": [
+      {
+        "id": 1,
+        "account": "",
+        "label": "CBE Birr 1",
+        "active": true
+      },
+      {
+        "id": 2,
+        "account": "",
+        "label": "CBE Birr 2",
+        "active": true
+      },
+      {
+        "id": 3,
+        "account": "",
+        "label": "CBE Birr 3",
+        "active": true
+      }
+    ],
+    "awash": [
+      {
+        "id": 1,
+        "account": "",
+        "label": "Awash Account 1",
+        "active": true
+      },
+      {
+        "id": 2,
+        "account": "",
+        "label": "Awash Account 2",
+        "active": true
+      },
+      {
+        "id": 3,
+        "account": "",
+        "label": "Awash Account 3",
+        "active": true
+      }
+    ],
+    "dashen": [
+      {
+        "id": 1,
+        "account": "",
+        "label": "Dashen Account 1",
+        "active": true
+      },
+      {
+        "id": 2,
+        "account": "",
+        "label": "Dashen Account 2",
+        "active": true
+      },
+      {
+        "id": 3,
+        "account": "",
+        "label": "Dashen Account 3",
+        "active": true
+      }
+    ],
+    "mpesa": [
+      {
+        "id": 1,
+        "account": "",
+        "label": "M-Pesa 1",
+        "active": true
+      },
+      {
+        "id": 2,
+        "account": "",
+        "label": "M-Pesa 2",
+        "active": true
+      },
+      {
+        "id": 3,
+        "account": "",
+        "label": "M-Pesa 3",
+        "active": true
+      }
+    ],
+    "siinqee": [
+      {
+        "id": 1,
+        "account": "",
+        "label": "Siinqee Account 1",
+        "active": true
+      },
+      {
+        "id": 2,
+        "account": "",
+        "label": "Siinqee Account 2",
+        "active": true
+      }
+    ]
+  }
+}
