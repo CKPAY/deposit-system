@@ -274,7 +274,18 @@ function getEthiopianTimeMidnightTimestamps() {
   // Month start: 1st of month at 00:00:00 GMT+3 (1st of month midnight in Ethiopia)
   const monthStartUTC = Date.UTC(year, month, 1) - ETHIOPIA_OFFSET_MS;
 
-  return { todayStart: todayStartUTC, weekStart: weekStartUTC, monthStart: monthStartUTC };
+  // Last Week: Monday 00:00:00 EAT to Sunday 23:59:59.999 EAT of previous week
+  const ONE_WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+  const lastWeekStartUTC = weekStartUTC - ONE_WEEK_MS;
+  const lastWeekEndUTC = weekStartUTC - 1;
+
+  return {
+    todayStart: todayStartUTC,
+    weekStart: weekStartUTC,
+    lastWeekStart: lastWeekStartUTC,
+    lastWeekEnd: lastWeekEndUTC,
+    monthStart: monthStartUTC
+  };
 }
 
 router.get('/stats', (req, res) => {
@@ -285,9 +296,41 @@ router.get('/stats', (req, res) => {
 });
 
 router.get('/transactions', (req, res) => {
-  const { status, search, platform } = req.query;
-  const filtered = getAllTxs({ status, search, platform });
+  const { status, search, platform, bank } = req.query;
+  const filtered = getAllTxs({ status, search, platform, bank });
   res.json(filtered);
+});
+
+router.get('/bank-accounts', (req, res) => {
+  const platform = req.query.platform || 'jember';
+  const bank = req.query.bank || 'cbe';
+  const p = String(platform).toLowerCase();
+  const b = String(bank).toLowerCase();
+
+  const fullData = readJSON('bank_accounts.json') || {};
+  const platData = fullData[p] || {};
+  const accounts = Array.isArray(platData[b]) ? platData[b] : [];
+
+  res.json(accounts);
+});
+
+router.put('/bank-accounts', requireAdminRole, (req, res) => {
+  const platform = req.body.platform || req.query.platform || 'jember';
+  const bank = req.body.bank || req.query.bank || 'cbe';
+  const p = String(platform).toLowerCase();
+  const b = String(bank).toLowerCase();
+
+  let { accounts } = req.body;
+  if (!Array.isArray(accounts)) {
+    return res.status(400).json({ error: 'Accounts array is required' });
+  }
+
+  const fullData = readJSON('bank_accounts.json') || {};
+  if (!fullData[p]) fullData[p] = {};
+  fullData[p][b] = accounts;
+
+  writeJSON('bank_accounts.json', fullData);
+  res.json({ success: true, platform: p, bank: b, accounts });
 });
 
 function getPlatformNumbersData(platform = 'jember') {
@@ -584,3 +627,4 @@ router.delete('/transactions/clear-expired', (req, res) => {
 module.exports = router;
 module.exports.activeSessions = activeSessions;
 module.exports.getUserRoleInfo = getUserRoleInfo;
+module.exports.getEthiopianTimeMidnightTimestamps = getEthiopianTimeMidnightTimestamps;
