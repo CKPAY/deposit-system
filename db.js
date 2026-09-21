@@ -41,7 +41,6 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_userId ON transactions(userId);
   CREATE INDEX IF NOT EXISTS idx_status ON transactions(status);
   CREATE INDEX IF NOT EXISTS idx_transactionId ON transactions(transactionId);
-  CREATE INDEX IF NOT EXISTS idx_tx_bank ON transactions(bank);
 
   CREATE TABLE IF NOT EXISTS withdrawals (
     id TEXT PRIMARY KEY,
@@ -69,7 +68,6 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_w_platform ON withdrawals(platform);
   CREATE INDEX IF NOT EXISTS idx_w_userId ON withdrawals(userId);
   CREATE INDEX IF NOT EXISTS idx_w_createdAt ON withdrawals(createdAt);
-  CREATE INDEX IF NOT EXISTS idx_w_bank ON withdrawals(bank);
 `);
 
 // Safe column migration for existing databases
