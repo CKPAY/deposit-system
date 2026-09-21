@@ -33,12 +33,15 @@ db.exec(`
     submittedAt INTEGER,
     returnUrl TEXT,
     callbackUrl TEXT,
-    platform TEXT NOT NULL DEFAULT 'jember'
+    platform TEXT NOT NULL DEFAULT 'jember',
+    bank TEXT NOT NULL DEFAULT 'telebirr',
+    accountNumber TEXT
   );
 
   CREATE INDEX IF NOT EXISTS idx_userId ON transactions(userId);
   CREATE INDEX IF NOT EXISTS idx_status ON transactions(status);
   CREATE INDEX IF NOT EXISTS idx_transactionId ON transactions(transactionId);
+  CREATE INDEX IF NOT EXISTS idx_tx_bank ON transactions(bank);
 
   CREATE TABLE IF NOT EXISTS withdrawals (
     id TEXT PRIMARY KEY,
@@ -56,13 +59,17 @@ db.exec(`
     returnUrl TEXT,
     callbackUrl TEXT,
     assignedAgent TEXT,
-    receiptImage TEXT
+    receiptImage TEXT,
+    bank TEXT NOT NULL DEFAULT 'telebirr',
+    accountNumber TEXT,
+    accountHolderName TEXT
   );
 
   CREATE INDEX IF NOT EXISTS idx_w_status ON withdrawals(status);
   CREATE INDEX IF NOT EXISTS idx_w_platform ON withdrawals(platform);
   CREATE INDEX IF NOT EXISTS idx_w_userId ON withdrawals(userId);
   CREATE INDEX IF NOT EXISTS idx_w_createdAt ON withdrawals(createdAt);
+  CREATE INDEX IF NOT EXISTS idx_w_bank ON withdrawals(bank);
 `);
 
 // Safe column migration for existing databases
@@ -74,6 +81,17 @@ try {
   }
   db.exec(`CREATE INDEX IF NOT EXISTS idx_platform ON transactions(platform)`);
 
+  const hasBank = tableInfo.some(col => col.name === 'bank');
+  if (!hasBank) {
+    db.exec(`ALTER TABLE transactions ADD COLUMN bank TEXT NOT NULL DEFAULT 'telebirr'`);
+  }
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_tx_bank ON transactions(bank)`);
+
+  const hasAccountNumber = tableInfo.some(col => col.name === 'accountNumber');
+  if (!hasAccountNumber) {
+    db.exec(`ALTER TABLE transactions ADD COLUMN accountNumber TEXT`);
+  }
+
   const wTableInfo = db.prepare(`PRAGMA table_info(withdrawals)`).all();
   const hasAssignedAgent = wTableInfo.some(col => col.name === 'assignedAgent');
   if (!hasAssignedAgent) {
@@ -83,6 +101,21 @@ try {
   if (!hasReceiptImage) {
     db.exec(`ALTER TABLE withdrawals ADD COLUMN receiptImage TEXT`);
   }
+  const hasWBank = wTableInfo.some(col => col.name === 'bank');
+  if (!hasWBank) {
+    db.exec(`ALTER TABLE withdrawals ADD COLUMN bank TEXT NOT NULL DEFAULT 'telebirr'`);
+  }
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_w_bank ON withdrawals(bank)`);
+
+  const hasWAccountNumber = wTableInfo.some(col => col.name === 'accountNumber');
+  if (!hasWAccountNumber) {
+    db.exec(`ALTER TABLE withdrawals ADD COLUMN accountNumber TEXT`);
+  }
+  const hasWAccountHolder = wTableInfo.some(col => col.name === 'accountHolderName');
+  if (!hasWAccountHolder) {
+    db.exec(`ALTER TABLE withdrawals ADD COLUMN accountHolderName TEXT`);
+  }
+
   db.exec(`CREATE INDEX IF NOT EXISTS idx_w_assignedAgent ON withdrawals(assignedAgent)`);
 } catch (e) {
   console.error('Migration index notice:', e.message);
@@ -93,11 +126,11 @@ const stmtInsertTx = db.prepare(`
   INSERT OR REPLACE INTO transactions (
     id, orderId, userId, requestedAmount, amount, verifiedAmount,
     phoneNumber, status, transactionId, failReason, receipt,
-    createdAt, expiresAt, submittedAt, returnUrl, callbackUrl, platform
+    createdAt, expiresAt, submittedAt, returnUrl, callbackUrl, platform, bank, accountNumber
   ) VALUES (
     @id, @orderId, @userId, @requestedAmount, @amount, @verifiedAmount,
     @phoneNumber, @status, @transactionId, @failReason, @receipt,
-    @createdAt, @expiresAt, @submittedAt, @returnUrl, @callbackUrl, @platform
+    @createdAt, @expiresAt, @submittedAt, @returnUrl, @callbackUrl, @platform, @bank, @accountNumber
   )
 `);
 
@@ -109,7 +142,7 @@ function saveTx(tx) {
     requestedAmount: Number(tx.requestedAmount || tx.amount),
     amount: Number(tx.amount),
     verifiedAmount: tx.verifiedAmount !== undefined ? Number(tx.verifiedAmount) : null,
-    phoneNumber: String(tx.phoneNumber),
+    phoneNumber: String(tx.phoneNumber || ''),
     status: String(tx.status),
     transactionId: tx.transactionId ? String(tx.transactionId).trim().toUpperCase() : null,
     failReason: tx.failReason || null,
@@ -120,6 +153,8 @@ function saveTx(tx) {
     returnUrl: tx.returnUrl || null,
     callbackUrl: tx.callbackUrl || null,
     platform: String(tx.platform || 'jember').toLowerCase(),
+    bank: String(tx.bank || 'telebirr').toLowerCase(),
+    accountNumber: tx.accountNumber ? String(tx.accountNumber).trim() : null,
   };
   stmtInsertTx.run(row);
 }
@@ -241,10 +276,15 @@ function getAllTxs(filters = {}) {
     params.push(filters.status);
   }
 
+  if (filters.bank && filters.bank !== 'all') {
+    conditions.push(`bank = ?`);
+    params.push(String(filters.bank).toLowerCase());
+  }
+
   if (filters.search) {
-    conditions.push(`(userId LIKE ? OR transactionId LIKE ? OR phoneNumber LIKE ? OR id LIKE ?)`);
+    conditions.push(`(userId LIKE ? OR transactionId LIKE ? OR phoneNumber LIKE ? OR id LIKE ? OR accountNumber LIKE ?)`);
     const term = `%${filters.search}%`;
-    params.push(term, term, term, term);
+    params.push(term, term, term, term, term);
   }
 
   if (conditions.length > 0) {
@@ -271,6 +311,8 @@ function getStats(platform = 'all', timestamps = {}) {
 
   const todayStart = Number(timestamps.todayStart) || 0;
   const weekStart = Number(timestamps.weekStart) || 0;
+  const lastWeekStart = Number(timestamps.lastWeekStart) || 0;
+  const lastWeekEnd = Number(timestamps.lastWeekEnd) || 0;
   const monthStart = Number(timestamps.monthStart) || 0;
 
   const sql = `
@@ -279,10 +321,12 @@ function getStats(platform = 'all', timestamps = {}) {
       SUM(CASE WHEN status = 'verified' THEN COALESCE(verifiedAmount, amount, 0) ELSE 0 END) as totalETB,
       SUM(CASE WHEN status = 'verified' AND createdAt >= ${todayStart} THEN COALESCE(verifiedAmount, amount, 0) ELSE 0 END) as todayETB,
       SUM(CASE WHEN status = 'verified' AND createdAt >= ${weekStart} THEN COALESCE(verifiedAmount, amount, 0) ELSE 0 END) as weekETB,
+      SUM(CASE WHEN status = 'verified' AND createdAt >= ${lastWeekStart} AND createdAt <= ${lastWeekEnd} THEN COALESCE(verifiedAmount, amount, 0) ELSE 0 END) as lastWeekETB,
       SUM(CASE WHEN status = 'verified' AND createdAt >= ${monthStart} THEN COALESCE(verifiedAmount, amount, 0) ELSE 0 END) as monthETB,
       COUNT(CASE WHEN status = 'verified' THEN 1 END) as verified,
       COUNT(CASE WHEN status = 'verified' AND createdAt >= ${todayStart} THEN 1 END) as todayCount,
       COUNT(CASE WHEN status = 'verified' AND createdAt >= ${weekStart} THEN 1 END) as weekCount,
+      COUNT(CASE WHEN status = 'verified' AND createdAt >= ${lastWeekStart} AND createdAt <= ${lastWeekEnd} THEN 1 END) as lastWeekCount,
       COUNT(CASE WHEN status = 'verified' AND createdAt >= ${monthStart} THEN 1 END) as monthCount,
       COUNT(CASE WHEN status = 'pending' THEN 1 END) as pending,
       COUNT(CASE WHEN status = 'processing' THEN 1 END) as processing,
@@ -298,6 +342,7 @@ function getStats(platform = 'all', timestamps = {}) {
     total: row.total || 0,
     todayCount: row.todayCount || 0,
     weekCount: row.weekCount || 0,
+    lastWeekCount: row.lastWeekCount || 0,
     monthCount: row.monthCount || 0,
     pending: row.pending || 0,
     processing: row.processing || 0,
@@ -307,6 +352,7 @@ function getStats(platform = 'all', timestamps = {}) {
     totalETB: row.totalETB || 0,
     todayETB: row.todayETB || 0,
     weekETB: row.weekETB || 0,
+    lastWeekETB: row.lastWeekETB || 0,
     monthETB: row.monthETB || 0,
   };
 }
@@ -316,11 +362,13 @@ const stmtInsertWithdrawal = db.prepare(`
   INSERT OR REPLACE INTO withdrawals (
     id, orderId, userId, amount, phoneNumber, status,
     transactionId, rejectReason, processedBy, platform,
-    createdAt, processedAt, returnUrl, callbackUrl, assignedAgent, receiptImage
+    createdAt, processedAt, returnUrl, callbackUrl, assignedAgent, receiptImage,
+    bank, accountNumber, accountHolderName
   ) VALUES (
     @id, @orderId, @userId, @amount, @phoneNumber, @status,
     @transactionId, @rejectReason, @processedBy, @platform,
-    @createdAt, @processedAt, @returnUrl, @callbackUrl, @assignedAgent, @receiptImage
+    @createdAt, @processedAt, @returnUrl, @callbackUrl, @assignedAgent, @receiptImage,
+    @bank, @accountNumber, @accountHolderName
   )
 `);
 
@@ -330,7 +378,7 @@ function saveWithdrawal(w) {
     orderId: w.orderId || null,
     userId: String(w.userId),
     amount: Number(w.amount),
-    phoneNumber: String(w.phoneNumber),
+    phoneNumber: String(w.phoneNumber || ''),
     status: String(w.status || 'pending'),
     transactionId: w.transactionId ? String(w.transactionId).trim().toUpperCase() : null,
     rejectReason: w.rejectReason || null,
@@ -342,6 +390,9 @@ function saveWithdrawal(w) {
     callbackUrl: w.callbackUrl || null,
     assignedAgent: w.assignedAgent ? String(w.assignedAgent).trim() : null,
     receiptImage: w.receiptImage || null,
+    bank: String(w.bank || 'telebirr').toLowerCase(),
+    accountNumber: w.accountNumber ? String(w.accountNumber).trim() : null,
+    accountHolderName: w.accountHolderName ? String(w.accountHolderName).trim() : null,
   };
   stmtInsertWithdrawal.run(row);
   return row;
@@ -387,8 +438,16 @@ function getAllWithdrawals(filters = {}) {
   }
 
   if (filters.sinceTimestamp) {
-    conditions.push(`(createdAt >= ? OR (processedAt IS NOT NULL AND processedAt >= ?))`);
-    params.push(Number(filters.sinceTimestamp), Number(filters.sinceTimestamp));
+    if (filters.untilTimestamp) {
+      conditions.push(`((createdAt >= ? AND createdAt <= ?) OR (processedAt IS NOT NULL AND processedAt >= ? AND processedAt <= ?))`);
+      params.push(
+        Number(filters.sinceTimestamp), Number(filters.untilTimestamp),
+        Number(filters.sinceTimestamp), Number(filters.untilTimestamp)
+      );
+    } else {
+      conditions.push(`(createdAt >= ? OR (processedAt IS NOT NULL AND processedAt >= ?))`);
+      params.push(Number(filters.sinceTimestamp), Number(filters.sinceTimestamp));
+    }
   }
 
   if (Array.isArray(filters.platforms) && filters.platforms.length > 0) {
@@ -400,15 +459,20 @@ function getAllWithdrawals(filters = {}) {
     params.push(String(filters.platform).toLowerCase());
   }
 
+  if (filters.bank && filters.bank !== 'all') {
+    conditions.push(`bank = ?`);
+    params.push(String(filters.bank).toLowerCase());
+  }
+
   if (filters.status && filters.status !== 'all') {
     conditions.push(`status = ?`);
     params.push(filters.status);
   }
 
   if (filters.search) {
-    conditions.push(`(userId LIKE ? OR phoneNumber LIKE ? OR transactionId LIKE ? OR orderId LIKE ? OR id LIKE ? OR assignedAgent LIKE ?)`);
+    conditions.push(`(userId LIKE ? OR phoneNumber LIKE ? OR transactionId LIKE ? OR orderId LIKE ? OR id LIKE ? OR assignedAgent LIKE ? OR accountNumber LIKE ? OR accountHolderName LIKE ?)`);
     const term = `%${filters.search}%`;
-    params.push(term, term, term, term, term, term);
+    params.push(term, term, term, term, term, term, term, term);
   }
 
   if (conditions.length > 0) {
@@ -419,7 +483,7 @@ function getAllWithdrawals(filters = {}) {
   return db.prepare(sql).all(...params);
 }
 
-function getWithdrawalStats(platform = 'all', timestamps = {}, { assignedAgent = null, platforms = null, sinceTimestamp = null } = {}) {
+function getWithdrawalStats(platform = 'all', timestamps = {}, { assignedAgent = null, platforms = null, sinceTimestamp = null, untilTimestamp = null } = {}) {
   const conditions = [];
   const params = [];
 
@@ -441,9 +505,13 @@ function getWithdrawalStats(platform = 'all', timestamps = {}, { assignedAgent =
 
   const todayStart = Number(timestamps.todayStart) || 0;
   const weekStart = Number(timestamps.weekStart) || 0;
+  const lastWeekStart = Number(timestamps.lastWeekStart) || 0;
+  const lastWeekEnd = Number(timestamps.lastWeekEnd) || 0;
   const monthStart = Number(timestamps.monthStart) || 0;
 
-  const timeFilterClause = sinceTimestamp
+  const timeFilterClause = (sinceTimestamp && untilTimestamp)
+    ? `AND ((createdAt >= ${Number(sinceTimestamp)} AND createdAt <= ${Number(untilTimestamp)}) OR (processedAt IS NOT NULL AND processedAt >= ${Number(sinceTimestamp)} AND processedAt <= ${Number(untilTimestamp)}))`
+    : sinceTimestamp
     ? `AND (createdAt >= ${Number(sinceTimestamp)} OR (processedAt IS NOT NULL AND processedAt >= ${Number(sinceTimestamp)}))`
     : '';
 
@@ -457,9 +525,11 @@ function getWithdrawalStats(platform = 'all', timestamps = {}, { assignedAgent =
       SUM(CASE WHEN status = 'completed' THEN amount ELSE 0 END) as totalPaidETB,
       SUM(CASE WHEN status = 'completed' AND processedAt >= ${todayStart} THEN amount ELSE 0 END) as todayPaidETB,
       SUM(CASE WHEN status = 'completed' AND processedAt >= ${weekStart} THEN amount ELSE 0 END) as weekPaidETB,
+      SUM(CASE WHEN status = 'completed' AND processedAt >= ${lastWeekStart} AND processedAt <= ${lastWeekEnd} THEN amount ELSE 0 END) as lastWeekPaidETB,
       SUM(CASE WHEN status = 'completed' AND processedAt >= ${monthStart} THEN amount ELSE 0 END) as monthPaidETB,
       COUNT(CASE WHEN status = 'completed' AND processedAt >= ${todayStart} THEN 1 END) as todayCount,
       COUNT(CASE WHEN status = 'completed' AND processedAt >= ${weekStart} THEN 1 END) as weekCount,
+      COUNT(CASE WHEN status = 'completed' AND processedAt >= ${lastWeekStart} AND processedAt <= ${lastWeekEnd} THEN 1 END) as lastWeekCount,
       COUNT(CASE WHEN status = 'completed' AND processedAt >= ${monthStart} THEN 1 END) as monthCount
     FROM withdrawals${whereClause}
   `;
@@ -475,9 +545,11 @@ function getWithdrawalStats(platform = 'all', timestamps = {}, { assignedAgent =
     totalPaidETB: row.totalPaidETB || 0,
     todayPaidETB: row.todayPaidETB || 0,
     weekPaidETB: row.weekPaidETB || 0,
+    lastWeekPaidETB: row.lastWeekPaidETB || 0,
     monthPaidETB: row.monthPaidETB || 0,
     todayCount: row.todayCount || 0,
     weekCount: row.weekCount || 0,
+    lastWeekCount: row.lastWeekCount || 0,
     monthCount: row.monthCount || 0,
   };
 }
