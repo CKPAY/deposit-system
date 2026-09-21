@@ -37,8 +37,10 @@ function createWebhookPayload(tx, status, verifiedAmt = 0, receiptData = {}, err
     requestedAmount: tx.requestedAmount || tx.amount || 0,
     verifiedAmount: verifiedAmount,
     amount: verifiedAmount,
+    bank: tx.bank || 'telebirr',
     transactionId: tx.transactionId || null,
     phoneNumber: tx.phoneNumber || null,
+    accountNumber: tx.accountNumber || tx.phoneNumber || null,
     payer: receiptData.payer || null,
     receiver: receiptData.receiver || null,
     error: errorMessage || tx.failReason || null,
@@ -218,6 +220,43 @@ function matchesMaskedPhone(creditedStr, activePhones) {
   return activePhones.some(ph => normalizePhone(ph) === norm);
 }
 
+function getPlatformBankAccounts(platform = 'jember', bank = 'cbe') {
+  const p = String(platform || 'jember').toLowerCase();
+  const b = String(bank || 'cbe').toLowerCase();
+  const raw = readJSON('bank_accounts.json') || {};
+  if (raw[p] && Array.isArray(raw[p][b])) {
+    return raw[p][b];
+  }
+  return [];
+}
+
+function getActiveBankAccounts(platform = 'jember', bank = 'cbe') {
+  const list = getPlatformBankAccounts(platform, bank);
+  return list.filter(a => a.active !== false && a.account && a.account.trim()).map(a => a.account.trim());
+}
+
+function matchesMaskedAccount(creditedStr, activeAccounts) {
+  if (!creditedStr || !Array.isArray(activeAccounts) || activeAccounts.length === 0) return false;
+  const str = String(creditedStr).trim();
+  if (!str) return false;
+  const digitsOnly = str.replace(/\D/g, '');
+  if (digitsOnly.length === 0) return false;
+
+  if (str.includes('*')) {
+    const parts = str.split(/\*+/);
+    const prefix = parts[0] ? parts[0].replace(/\D/g, '') : '';
+    const suffix = parts[parts.length - 1] ? parts[parts.length - 1].replace(/\D/g, '') : '';
+    return activeAccounts.some(acc => {
+      const cleanAcc = acc.replace(/\D/g, '');
+      if (prefix && !cleanAcc.startsWith(prefix)) return false;
+      if (suffix && !cleanAcc.endsWith(suffix)) return false;
+      return true;
+    });
+  }
+
+  return activeAccounts.some(acc => acc.replace(/\D/g, '') === digitsOnly);
+}
+
 function extractTransactionId(text) {
   if (!text) return null;
   const str = String(text).trim();
@@ -234,17 +273,16 @@ function extractTransactionId(text) {
   if (matchReceipt && matchReceipt[1]) return matchReceipt[1].trim().toUpperCase();
 
   // 3. Multilingual keywords for Ethiopian Languages & English:
-  // - Amharic (አማርኛ): የግብይት ቁጥር, የግብይት መለያ, የግብይት ቁጥርዎ, መለያ ቁጥር, የደረሰኝ ቁጥር
-  // - Afaan Oromoo: lakkoofsa daldalaa, lakk. daldalaa, lakk. dabarsaa, lakkoofsa nagahee, lakk. ajajaa
-  // - Tigrinya (ትግርኛ): ቁጽሪ ንግዲ, ናይ ንግዲ ቁጽሪ, ቁጽሪ ትራንዛክሽን, ቁጽሪ ደረሰኝ
-  // - Somali (Af Soomaali): lambarka macaamilka, lambarka rasiidka, lambarka tixraaca
-  // - English: transaction number is, transaction id, txn, txid, ref, reference
   const matchKeyword = str.match(
     /(?:transaction\s+(?:number\s+is|id|number|no|code)|txn|txid|ref(?:erence)?|receipt|የግብይት\s*(?:ቁጥር(?:ዎ)?|መለያ)?|መለያ\s*ቁጥር|የደረሰኝ\s*ቁጥር|lakk(?:oofsa)?\.?\s*(?:daldala(?:a| keessanii)?|dabarsaa|nagahee|ajajaa)?|ቁጽሪ\s*(?:ንግዲ(?:ኹም)?|ትራንዛክሽን|ደረሰኝ)?|lambarka\s*(?:macaamilka|rasiidka|tixraaca)?)\s*[:፡=]?\s*([A-Za-z0-9]{8,20})/iu
   );
   if (matchKeyword && matchKeyword[1]) return matchKeyword[1].trim().toUpperCase();
 
-  // 4. Standard 10-character Telebirr code pattern anywhere in text (e.g. DHH3VDJ5SH, DES8F3QMFM, DHI0VE7AGW)
+  // 4a. CBE Reference Number pattern (starts with FT followed by alphanumeric)
+  const matchCbeCode = str.match(/\b(FT[A-Za-z0-9]{8,18})\b/i);
+  if (matchCbeCode && matchCbeCode[1]) return matchCbeCode[1].trim().toUpperCase();
+
+  // 4b. Standard 10-character Telebirr code pattern anywhere in text (e.g. DHH3VDJ5SH, DES8F3QMFM, DHI0VE7AGW)
   const matchTelebirrCode = str.match(/\b(D[A-Za-z0-9]{9})\b/i);
   if (matchTelebirrCode && matchTelebirrCode[1]) return matchTelebirrCode[1].trim().toUpperCase();
 
@@ -381,22 +419,67 @@ router.post('/init', (req, res) => {
     return res.status(400).json({ error: `Amount must be between ${settings.minDeposit} and ${settings.maxDeposit} ETB` });
   }
 
-  const numbers = getPlatformNumbers(platform);
-  const activeNumberList = numbers.filter(n => n.phone && n.phone.trim() && n.active !== false);
-  if (activeNumberList.length === 0) {
-    return res.status(500).json({ error: `No active phone numbers configured for ${settings.siteName}` });
+  const explicitBank = req.body.bank || tokenPayload.bank || req.query.bank || 'telebirr';
+  const bank = String(explicitBank).toLowerCase();
+
+  let assignedPhone = '';
+  let assignedAccount = '';
+
+  if (bank === 'telebirr') {
+    const numbers = getPlatformNumbers(platform);
+    const activeNumberList = numbers.filter(n => n.phone && n.phone.trim() && n.active !== false);
+    if (activeNumberList.length === 0) {
+      return res.status(500).json({ error: `No active phone numbers configured for ${settings.siteName}` });
+    }
+
+    let assignmentsData = readJSON('assignments.json') || {};
+    const activeAssignments = getActiveAssignments(assignmentsData);
+    const now = Date.now();
+    const userKey = `${platform}:${userId}`;
+
+    // Assign a rotated phone number from this platform's dedicated pool
+    const userRecord = assignmentsData[userKey] || {};
+    let history = Array.isArray(userRecord.history) ? [...userRecord.history] : [];
+    if (userRecord.phone && !history.includes(userRecord.phone)) {
+      history.push(userRecord.phone);
+    }
+
+    if (history.length >= activeNumberList.length) {
+      const lastPhone = history[history.length - 1];
+      history = lastPhone ? [lastPhone] : [];
+    }
+
+    assignedPhone = pickPhoneNumber(activeNumberList, activeAssignments, history);
+    history.push(assignedPhone);
+
+    assignmentsData[userKey] = {
+      phone: assignedPhone,
+      platform: platform,
+      assignedAt: now,
+      history: history
+    };
+
+    const pruneLimit = 48 * 60 * 60 * 1000;
+    const prunedAssignments = {};
+    for (const [k, v] of Object.entries(assignmentsData)) {
+      if (now - (v.assignedAt || 0) < pruneLimit) {
+        prunedAssignments[k] = v;
+      }
+    }
+    writeJSON('assignments.json', prunedAssignments);
+  } else {
+    // Non-telebirr bank: pick active bank account
+    const bankAccounts = getPlatformBankAccounts(platform, bank);
+    const activeBankList = bankAccounts.filter(a => a.account && a.account.trim() && a.active !== false);
+    if (activeBankList.length === 0) {
+      return res.status(500).json({ error: `No active ${bank.toUpperCase()} accounts configured for ${settings.siteName}` });
+    }
+    const randomIdx = Math.floor(Math.random() * activeBankList.length);
+    assignedAccount = activeBankList[randomIdx].account.trim();
   }
 
-  let assignmentsData = readJSON('assignments.json') || {};
-  const activeAssignments = getActiveAssignments(assignmentsData);
-  const now = Date.now();
-
-  const userKey = `${platform}:${userId}`;
-
   // Re-use active pending session ONLY for browser reloads (no token, same amount & orderId)
-  // If a fresh token came in with a different amount, always start a new session
   if (!forceNew && rawToken) {
-    // Fresh token = new deposit request: expire any old pending session for this platform:user
     expireOldPendingTxs(userId, platform);
   } else if (!forceNew && !rawToken) {
     const activeSession = getActivePendingTx(userId, platform, amt);
@@ -404,7 +487,9 @@ router.post('/init', (req, res) => {
       return res.json({
         sessionId: activeSession.id,
         platform: platform,
+        bank: activeSession.bank || bank || 'telebirr',
         phoneNumber: activeSession.phoneNumber,
+        accountNumber: activeSession.accountNumber || activeSession.phoneNumber,
         amount: activeSession.amount,
         requestedAmount: activeSession.requestedAmount || activeSession.amount,
         expiresAt: activeSession.expiresAt,
@@ -418,42 +503,11 @@ router.post('/init', (req, res) => {
     }
   }
 
-  // Assign a rotated phone number from this platform's dedicated pool
-  const userRecord = assignmentsData[userKey] || {};
-  let history = Array.isArray(userRecord.history) ? [...userRecord.history] : [];
-  if (userRecord.phone && !history.includes(userRecord.phone)) {
-    history.push(userRecord.phone);
-  }
-
-  if (history.length >= activeNumberList.length) {
-    const lastPhone = history[history.length - 1];
-    history = lastPhone ? [lastPhone] : [];
-  }
-
-  const assignedPhone = pickPhoneNumber(activeNumberList, activeAssignments, history);
-  history.push(assignedPhone);
-
-  assignmentsData[userKey] = {
-    phone: assignedPhone,
-    platform: platform,
-    assignedAt: now,
-    history: history
-  };
-
-  // Prune entries older than 48 hours to keep assignments.json compact and fast
-  const pruneLimit = 48 * 60 * 60 * 1000;
-  const prunedAssignments = {};
-  for (const [k, v] of Object.entries(assignmentsData)) {
-    if (now - (v.assignedAt || 0) < pruneLimit) {
-      prunedAssignments[k] = v;
-    }
-  }
-  writeJSON('assignments.json', prunedAssignments);
-
   // Mark any old pending sessions as expired for this platform:user in SQLite
   expireOldPendingTxs(userId, platform);
 
   const sessionId = uuidv4();
+  const now = Date.now();
   const expiresAt = now + settings.sessionExpiry * 60 * 1000;
 
   const newTxObj = {
@@ -461,9 +515,11 @@ router.post('/init', (req, res) => {
     orderId: orderId || null,
     userId: String(userId),
     platform: platform,
+    bank: bank,
     requestedAmount: amt,
     amount: amt,
-    phoneNumber: assignedPhone,
+    phoneNumber: bank === 'telebirr' ? assignedPhone : assignedAccount,
+    accountNumber: bank === 'telebirr' ? null : assignedAccount,
     status: 'pending',
     createdAt: now,
     expiresAt,
@@ -477,8 +533,10 @@ router.post('/init', (req, res) => {
   res.json({
     sessionId,
     platform,
+    bank,
     orderId: orderId || null,
-    phoneNumber: assignedPhone,
+    phoneNumber: newTxObj.phoneNumber,
+    accountNumber: newTxObj.accountNumber || newTxObj.phoneNumber,
     amount: amt,
     requestedAmount: amt,
     expiresAt,
@@ -559,18 +617,62 @@ async function pollVerifyEtStatus(apiKey, requestId) {
   };
 }
 
-async function verifyWithVerifyEt(apiKey, transactionId) {
+async function verifyWithVerifyEt(apiKey, transactionId, bank = 'telebirr', receivingAccount = '') {
   try {
+    const b = String(bank || 'telebirr').toLowerCase();
+    const cleanTx = String(transactionId).trim();
+
+    let requestBody = {};
+    if (b === 'cbe') {
+      const suffix = (receivingAccount || '').replace(/\D/g, '').slice(-8);
+      requestBody = {
+        bank: 'cbe',
+        referenceNumber: cleanTx,
+        accountSuffix: suffix,
+        settlementAccount: receivingAccount || undefined,
+      };
+    } else if (b === 'boa') {
+      const suffix = (receivingAccount || '').replace(/\D/g, '').slice(-5);
+      requestBody = {
+        bank: 'boa',
+        referenceNumber: cleanTx,
+        accountSuffix: suffix,
+        settlementAccount: receivingAccount || undefined,
+      };
+    } else if (b === 'cbebirr') {
+      requestBody = {
+        bank: 'cbebirr',
+        receiptNumber: cleanTx,
+        phone: receivingAccount || undefined,
+        settlementAccount: receivingAccount || undefined,
+      };
+    } else if (b === 'mpesa') {
+      requestBody = {
+        bank: 'mpesa',
+        transactionNumber: cleanTx,
+        settlementAccount: receivingAccount || undefined,
+      };
+    } else if (b === 'awash' || b === 'dashen' || b === 'siinqee') {
+      requestBody = {
+        bank: b,
+        referenceNumber: cleanTx,
+        settlementAccount: receivingAccount || undefined,
+      };
+    } else {
+      // Telebirr default (100% untouched)
+      requestBody = {
+        bank: 'telebirr',
+        transactionNumber: cleanTx,
+      };
+    }
+
     const res = await fetch('https://verify.et/api/verify?waitMs=5000', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'x-api-key': apiKey,
       },
-      body: JSON.stringify({
-        bank: 'telebirr',
-        transactionNumber: transactionId,
-      }),
+      body: JSON.stringify(requestBody),
       signal: AbortSignal.timeout(10000),
     });
 
@@ -601,13 +703,19 @@ async function verifyWithVerifyEt(apiKey, transactionId) {
 
     const receiverAcc = resObj.receiverAccount || resObj.bankSpecific?.receiverAccount || resObj.creditedPartyAccountNo || rawData.receiverAccount || '';
     const amt = resObj.amount !== undefined ? resObj.amount : (resObj.amountValue !== undefined ? resObj.amountValue : (rawData.amount || '0'));
-    const sender = resObj.senderName || resObj.payerName || rawData.senderName || 'Telebirr Customer';
+    const sender = resObj.senderName || resObj.payerName || rawData.senderName || 'Customer';
     const receiver = resObj.receiverName || resObj.creditedPartyName || rawData.receiverName || 'Merchant';
     const txNum = resObj.transactionNumber || resObj.referenceNumber || resObj.receiptNumber || rawData.transactionNumber || transactionId;
+    const settlementMatch = Boolean(
+      resObj.settlementAccountMatch?.matched === true ||
+      rawData.settlementAccountMatch?.matched === true ||
+      data.settlementAccountMatch?.matched === true
+    );
 
     return {
       success: true,
       message: 'Transaction verified successfully.',
+      settlementMatch,
       receipt: {
         transactionId: txNum,
         status: 'VERIFIED',
@@ -627,7 +735,8 @@ async function verifyWithVerifyEt(apiKey, transactionId) {
   }
 }
 
-async function verifyWithVerifyEtMultiKey(settings, transactionId, targetPhoneNumber, activePhones, platform = 'jember') {
+async function verifyWithVerifyEtMultiKey(settings, transactionId, targetPhoneNumber, activePhones, platform = 'jember', bank = 'telebirr', receivingAccount = '') {
+  const b = String(bank || 'telebirr').toLowerCase();
   const apiKeys = Array.isArray(settings.apiKeys) ? settings.apiKeys : [];
   const primaryKey = getApiKeyForPhone(targetPhoneNumber, settings, platform);
 
@@ -650,15 +759,32 @@ async function verifyWithVerifyEtMultiKey(settings, transactionId, targetPhoneNu
   for (const key of keysToTry) {
     if (!key || key.includes('_placeholder')) continue;
 
-    console.log('[Verify] Trying key on Verify.ET for tx:', transactionId);
-    const result = await verifyWithVerifyEt(key, transactionId);
+    console.log(`[Verify] Trying key on Verify.ET for tx (${b}):`, transactionId);
+    const result = await verifyWithVerifyEt(key, transactionId, b, receivingAccount);
     console.log('[Verify] Result from verifyWithVerifyEt:', result.success, result.message, result.receipt?.creditedAccount);
+
     if (result.success && result.receipt) {
-      const credited = result.receipt.creditedAccount || result.receipt.receiver;
-      const isMatch = matchesMaskedPhone(credited, activePhones);
-      console.log('[Verify] Masked phone match:', credited, 'against activePhones:', isMatch);
-      if (isMatch) {
-        return result;
+      if (b === 'telebirr') {
+        const credited = result.receipt.creditedAccount || result.receipt.receiver;
+        const isMatch = matchesMaskedPhone(credited, activePhones);
+        console.log('[Verify] Masked phone match:', credited, 'against activePhones:', isMatch);
+        if (isMatch) {
+          return result;
+        }
+      } else {
+        if (result.settlementMatch === true) {
+          return result;
+        }
+        const credited = result.receipt.creditedAccount || result.receipt.receiver;
+        const activeAccounts = getActiveBankAccounts(platform, b);
+        if (activeAccounts.length === 0 || !credited) {
+          return result;
+        }
+        const isMatch = matchesMaskedAccount(credited, activeAccounts);
+        console.log(`[Verify] Bank (${b}) account match:`, credited, isMatch);
+        if (isMatch) {
+          return result;
+        }
       }
     }
     lastResult = result;
@@ -674,7 +800,9 @@ async function verifyWithVerifyEtMultiKey(settings, transactionId, targetPhoneNu
 
   return {
     success: false,
-    message: 'Transaction not found or could not be verified on any active phone number. Please check and try again.',
+    message: b === 'telebirr'
+      ? 'Transaction not found or could not be verified on any active phone number. Please check and try again.'
+      : `Transaction not found or could not be verified for ${b.toUpperCase()}. Please check and try again.`,
   };
 }
 
@@ -730,21 +858,25 @@ router.post('/verify', (req, res) => {
   // Process verification asynchronously in background
   (async () => {
     if (apiKey && apiKey.trim() && !apiKey.includes('_placeholder')) {
-      const result = await verifyWithVerifyEtMultiKey(settings, cleanTxId, tx.phoneNumber, activePhones, platform);
+      const bank = tx.bank || 'telebirr';
+      const targetAccount = tx.accountNumber || tx.phoneNumber;
+      const result = await verifyWithVerifyEtMultiKey(settings, cleanTxId, tx.phoneNumber, activePhones, platform, bank, targetAccount);
       console.log('[Verify Route] Outcome:', result.success, result.message, result.receipt);
       const currentTx = getTxById(sessionId);
 
       if (currentTx) {
         if (result.success && result.receipt) {
-          const creditedAccountStr = result.receipt.creditedAccount || result.receipt.receiver;
-          if (!matchesMaskedPhone(creditedAccountStr, activePhones)) {
-            console.log('[Verify Route] Reject: not matching activePhones:', creditedAccountStr);
-            updateTxStatus(sessionId, 'pending', {
-              transactionId: null,
-              submittedAt: null,
-              failReason: 'Transaction was not sent to an active deposit phone number. Please try again.'
-            });
-            return;
+          if (bank === 'telebirr') {
+            const creditedAccountStr = result.receipt.creditedAccount || result.receipt.receiver;
+            if (!matchesMaskedPhone(creditedAccountStr, activePhones)) {
+              console.log('[Verify Route] Reject: not matching activePhones:', creditedAccountStr);
+              updateTxStatus(sessionId, 'pending', {
+                transactionId: null,
+                submittedAt: null,
+                failReason: 'Transaction was not sent to an active deposit phone number. Please try again.'
+              });
+              return;
+            }
           }
 
           const rawAmt = result.receipt.amount || '0';
@@ -834,8 +966,10 @@ router.get('/session/:sessionId', (req, res) => {
   res.json({
     sessionId: tx.id,
     platform: platform,
+    bank: tx.bank || 'telebirr',
     status: tx.status,
     phoneNumber: tx.phoneNumber || null,
+    accountNumber: tx.accountNumber || tx.phoneNumber || null,
     amount: tx.amount,
     requestedAmount: tx.requestedAmount || tx.amount,
     expiresAt: tx.expiresAt,
@@ -856,8 +990,10 @@ router.get('/status/:sessionId', (req, res) => {
   res.json({
     status: tx.status,
     platform: tx.platform || 'jember',
+    bank: tx.bank || 'telebirr',
     amount: tx.amount,
     phoneNumber: tx.phoneNumber || null,
+    accountNumber: tx.accountNumber || tx.phoneNumber || null,
     verifiedAmount: tx.verifiedAmount || tx.amount,
     requestedAmount: tx.requestedAmount || tx.amount,
     transactionId: tx.transactionId,
