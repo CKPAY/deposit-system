@@ -63,7 +63,10 @@ function createWithdrawWebhookPayload(w, status, secret) {
     userId: w.userId,
     orderId: orderId,
     amount: amount,
+    bank: w.bank || 'telebirr',
     phoneNumber: w.phoneNumber,
+    accountNumber: w.accountNumber || w.phoneNumber,
+    accountHolderName: w.accountHolderName || null,
     // transactionId is omitted from partner webhook callbacks (stays private in CK-PAY admin)
     rejectReason: w.rejectReason || null,
     processedBy: w.processedBy || null,
@@ -119,7 +122,18 @@ function getEthiopianTimeMidnightTimestamps() {
   const weekStartUTC = todayStartUTC - (daysFromMonday * 24 * 60 * 60 * 1000);
   const monthStartUTC = Date.UTC(year, month, 1) - ETHIOPIA_OFFSET_MS;
 
-  return { todayStart: todayStartUTC, weekStart: weekStartUTC, monthStart: monthStartUTC };
+  // Last Week: Monday 00:00:00 EAT to Sunday 23:59:59.999 EAT of previous week
+  const ONE_WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+  const lastWeekStartUTC = weekStartUTC - ONE_WEEK_MS;
+  const lastWeekEndUTC = weekStartUTC - 1;
+
+  return {
+    todayStart: todayStartUTC,
+    weekStart: weekStartUTC,
+    lastWeekStart: lastWeekStartUTC,
+    lastWeekEnd: lastWeekEndUTC,
+    monthStart: monthStartUTC
+  };
 }
 
 // ─── PUBLIC / SERVER-TO-SERVER WITHDRAWAL ROUTES ─────────────────────────────
@@ -188,18 +202,27 @@ router.post(['/', '/init', '/request', '/create', '/payout'], (req, res) => {
       : 'jember'
   );
 
-  const userId = req.body.userId || req.body.account_id || tokenPayload.userId || tokenPayload.id || tokenPayload.account_id;
-  const amount = Number(req.body.amount || tokenPayload.amount);
-  const rawPhone = req.body.phoneNumber || req.body.phone || tokenPayload.phoneNumber || tokenPayload.phone;
-  const orderId = req.body.orderId || req.body.order_id || req.body.orderID || req.body.OrderId || req.body.reference || req.body.refId || tokenPayload.orderId || tokenPayload.order_id || tokenPayload.orderID || null;
+  const explicitBank = req.body.bank || tokenPayload.bank || 'telebirr';
+  const bank = String(explicitBank).toLowerCase();
+  const rawAccount = req.body.accountNumber || req.body.account || tokenPayload.accountNumber || tokenPayload.account || null;
+  const accountHolder = req.body.accountHolderName || req.body.accountHolder || tokenPayload.accountHolderName || tokenPayload.accountHolder || null;
 
   if (!userId || !amount || isNaN(amount) || amount <= 0) {
     return res.status(400).json({ error: 'Invalid withdrawal parameters (missing userId or amount)' });
   }
 
   const phone = normalizePhone(rawPhone);
-  if (!phone || !/^0[97]\d{8}$/.test(phone)) {
-    return res.status(400).json({ error: 'Please provide a valid 10-digit Ethiopian mobile number (09... or 07...)' });
+  let accountNum = (rawAccount ? String(rawAccount).trim() : '') || phone;
+
+  if (bank === 'telebirr' || bank === 'cbebirr' || bank === 'mpesa') {
+    if (!phone || !/^0[97]\d{8}$/.test(phone)) {
+      return res.status(400).json({ error: 'Please provide a valid 10-digit Ethiopian mobile number (09... or 07...)' });
+    }
+    accountNum = phone;
+  } else {
+    if (!accountNum) {
+      return res.status(400).json({ error: 'Please provide a valid destination bank account number' });
+    }
   }
 
   // Duplicate orderId check to prevent double-payouts
@@ -229,7 +252,10 @@ router.post(['/', '/init', '/request', '/create', '/payout'], (req, res) => {
     orderId: orderId,
     userId: String(userId),
     amount: amount,
-    phoneNumber: phone,
+    phoneNumber: phone || accountNum,
+    bank: bank,
+    accountNumber: accountNum,
+    accountHolderName: accountHolder,
     status: 'pending',
     transactionId: null,
     rejectReason: null,
@@ -360,14 +386,18 @@ function requireStaffAuth(req, res, next) {
 }
 
 router.get('/list', requireStaffAuth, (req, res) => {
-  const { platform, status, search, timeRange } = req.query;
+  const { platform, status, search, timeRange, bank } = req.query;
   const session = req.adminSession;
-  const filters = { platform, status, search };
+  const filters = { platform, status, search, bank };
 
   if (timeRange && timeRange !== 'all') {
     const timestamps = getEthiopianTimeMidnightTimestamps();
     if (timeRange === 'today') filters.sinceTimestamp = timestamps.todayStart;
     else if (timeRange === 'week') filters.sinceTimestamp = timestamps.weekStart;
+    else if (timeRange === 'last_week') {
+      filters.sinceTimestamp = timestamps.lastWeekStart;
+      filters.untilTimestamp = timestamps.lastWeekEnd;
+    }
     else if (timeRange === 'month') filters.sinceTimestamp = timestamps.monthStart;
   }
 
@@ -404,6 +434,10 @@ router.get('/stats', requireStaffAuth, (req, res) => {
   if (timeRange && timeRange !== 'all') {
     if (timeRange === 'today') options.sinceTimestamp = timestamps.todayStart;
     else if (timeRange === 'week') options.sinceTimestamp = timestamps.weekStart;
+    else if (timeRange === 'last_week') {
+      options.sinceTimestamp = timestamps.lastWeekStart;
+      options.untilTimestamp = timestamps.lastWeekEnd;
+    }
     else if (timeRange === 'month') options.sinceTimestamp = timestamps.monthStart;
   }
 
