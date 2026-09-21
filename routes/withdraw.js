@@ -202,6 +202,12 @@ router.post(['/', '/init', '/request', '/create', '/payout'], (req, res) => {
       : 'jember'
   );
 
+  const userId = req.body.userId || req.body.user_id || req.body.id || req.body.account_id || req.body.client_id || tokenPayload.userId || tokenPayload.user_id || tokenPayload.id || tokenPayload.account_id || null;
+  const rawAmount = req.body.amount !== undefined ? req.body.amount : tokenPayload.amount;
+  const amount = parseFloat(rawAmount);
+  const orderId = req.body.orderId || req.body.order_id || req.body.merchant_order_id || tokenPayload.order_id || tokenPayload.orderId || null;
+  const rawPhone = req.body.phoneNumber || req.body.phone || req.body.mobile || req.body.msisdn || tokenPayload.phoneNumber || tokenPayload.phone || tokenPayload.mobile || tokenPayload.msisdn || null;
+
   const explicitBank = req.body.bank || tokenPayload.bank || 'telebirr';
   const bank = String(explicitBank).toLowerCase();
   const rawAccount = req.body.accountNumber || req.body.account || tokenPayload.accountNumber || tokenPayload.account || null;
@@ -211,8 +217,8 @@ router.post(['/', '/init', '/request', '/create', '/payout'], (req, res) => {
     return res.status(400).json({ error: 'Invalid withdrawal parameters (missing userId or amount)' });
   }
 
-  const phone = normalizePhone(rawPhone);
-  let accountNum = (rawAccount ? String(rawAccount).trim() : '') || phone;
+  const phone = normalizePhone(rawPhone || rawAccount);
+  let accountNum = (rawAccount ? String(rawAccount).trim() : '') || (rawPhone ? String(rawPhone).trim() : '');
 
   if (bank === 'telebirr' || bank === 'cbebirr' || bank === 'mpesa') {
     if (!phone || !/^0[97]\d{8}$/.test(phone)) {
@@ -278,6 +284,8 @@ router.post(['/', '/init', '/request', '/create', '/payout'], (req, res) => {
     orderId: newWithdrawal.orderId,
     userId: newWithdrawal.userId,
     amount: newWithdrawal.amount,
+    bank: newWithdrawal.bank,
+    accountNumber: newWithdrawal.accountNumber,
     phoneNumber: newWithdrawal.phoneNumber,
     status: newWithdrawal.status,
     platform: newWithdrawal.platform,
