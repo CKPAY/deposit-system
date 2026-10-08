@@ -235,6 +235,16 @@ function getActiveBankAccounts(platform = 'jember', bank = 'cbe') {
   return list.filter(a => a.active !== false && a.account && a.account.trim()).map(a => a.account.trim());
 }
 
+function isBankEnabled(platform = 'jember', bank = 'cbe') {
+  const p = String(platform || 'jember').toLowerCase();
+  const b = String(bank || 'cbe').toLowerCase();
+  const raw = readJSON('bank_accounts.json') || {};
+  if (raw[p] && raw[p].bankStatus && raw[p].bankStatus[b] === false) {
+    return false;
+  }
+  return true;
+}
+
 function matchesMaskedAccount(creditedStr, activeAccounts) {
   if (!creditedStr || !Array.isArray(activeAccounts) || activeAccounts.length === 0) return false;
   const str = String(creditedStr).trim();
@@ -373,6 +383,25 @@ router.post('/test-callback', (req, res) => {
   });
 });
 
+router.get('/active-banks', (req, res) => {
+  const platform = req.query.platform || detectPlatform(req) || 'jember';
+  const p = String(platform).toLowerCase();
+  const raw = readJSON('bank_accounts.json') || {};
+  const platData = raw[p] || {};
+  const status = platData.bankStatus || {};
+
+  const SUPPORTED_7_BANKS = ['cbe', 'boa', 'cbebirr', 'awash', 'dashen', 'mpesa', 'siinqee'];
+
+  // Bank is enabled if status[b] !== false
+  const activeBanks = SUPPORTED_7_BANKS.filter(b => status[b] !== false);
+
+  res.json({
+    platform: p,
+    activeBanks,
+    status
+  });
+});
+
 router.post('/init', (req, res) => {
   let tokenPayload = {};
   let detectedPlatformFromToken = null;
@@ -468,7 +497,10 @@ router.post('/init', (req, res) => {
     }
     writeJSON('assignments.json', prunedAssignments);
   } else {
-    // Non-telebirr bank: pick active bank account
+    // Non-telebirr bank: check if enabled
+    if (!isBankEnabled(platform, bank)) {
+      return res.status(400).json({ error: `${bank.toUpperCase()} is currently disabled for ${settings.siteName}. Please choose another bank.` });
+    }
     const bankAccounts = getPlatformBankAccounts(platform, bank);
     const activeBankList = bankAccounts.filter(a => a.account && a.account.trim() && a.active !== false);
     if (activeBankList.length === 0) {
