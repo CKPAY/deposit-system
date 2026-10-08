@@ -333,6 +333,35 @@ router.put('/bank-accounts', requireAdminRole, (req, res) => {
   res.json({ success: true, platform: p, bank: b, accounts });
 });
 
+router.get('/bank-status', (req, res) => {
+  const platform = req.query.platform || 'jember';
+  const p = String(platform).toLowerCase();
+
+  const fullData = readJSON('bank_accounts.json') || {};
+  const platData = fullData[p] || {};
+  const bankStatus = platData.bankStatus || {};
+
+  res.json(bankStatus);
+});
+
+router.put('/bank-status', requireAdminRole, (req, res) => {
+  const platform = req.body.platform || 'jember';
+  const bank = req.body.bank;
+  const enabled = req.body.enabled !== false;
+  const p = String(platform).toLowerCase();
+  const b = String(bank || '').toLowerCase();
+
+  if (!b) return res.status(400).json({ error: 'Bank code required' });
+
+  const fullData = readJSON('bank_accounts.json') || {};
+  if (!fullData[p]) fullData[p] = {};
+  if (!fullData[p].bankStatus) fullData[p].bankStatus = {};
+  fullData[p].bankStatus[b] = enabled;
+
+  writeJSON('bank_accounts.json', fullData);
+  res.json({ success: true, platform: p, bank: b, enabled });
+});
+
 function getPlatformNumbersData(platform = 'jember') {
   const p = String(platform || 'jember').toLowerCase();
   const data = readJSON('numbers.json') || {};
