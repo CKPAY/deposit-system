@@ -353,32 +353,91 @@ function pickPhoneNumber(numbers, activeAssignments, userHistory = []) {
 }
 
 router.post('/test-callback', (req, res) => {
-  const orderId = req.body.orderId || req.body.order_id || '56031b32-a1c8-4fce-93bd-92213c6e14d5';
-  const status = req.body.status || 'verified';
+  const orderId = (req.body.orderId || req.body.order_id || req.body.sessionId || req.body.id || '56031b32-a1c8-4fce-93bd-92213c6e14d5').toString().trim();
+  const status = (req.body.status || 'verified').toLowerCase();
   
+  // Case-insensitive lookup by orderId or sessionId
   const foundTx = orderId ? (getTxByOrderId(orderId) || getTxById(orderId)) : null;
   
+  // Real requested amount: prioritize the existing transaction from SQLite
+  const requestedAmt = Number(
+    (foundTx && (foundTx.requestedAmount || foundTx.amount)) ||
+    req.body.requestedAmount ||
+    req.body.requested_amount ||
+    req.body.amount ||
+    100
+  );
+
+  // If verified, verifiedAmount is paid amount; for rejected/failed/expired, it is 0
+  const verifiedAmt = status === 'verified'
+    ? Number(req.body.verifiedAmount || req.body.amount || foundTx?.verifiedAmount || requestedAmt)
+    : 0;
+
   const callbackUrl = req.body.callbackUrl || req.body.callback_url || foundTx?.callbackUrl || 'https://cbtestpayment.testenvh.com/CKPay/process';
-  const amount = Number(req.body.amount || req.body.verifiedAmount || foundTx?.requestedAmount || foundTx?.amount || 100);
   const userId = req.body.userId || req.body.user_id || foundTx?.userId || 'TEST_USER_9921';
-  const sessionId = foundTx?.id || orderId || uuidv4();
-  const phoneNumber = foundTx?.phoneNumber || '0911223344';
+  const sessionId = foundTx?.id || (req.body.sessionId ? String(req.body.sessionId).trim() : orderId) || uuidv4();
+  const phoneNumber = foundTx?.phoneNumber || req.body.phoneNumber || '0911223344';
+  const bank = foundTx?.bank || req.body.bank || 'telebirr';
+  const platform = foundTx?.platform || req.body.platform || 'jember';
+  const accountNumber = foundTx?.accountNumber || req.body.accountNumber || (bank !== 'telebirr' ? phoneNumber : null);
+
+  // If transaction exists in DB, update its status
+  if (foundTx) {
+    updateTxStatus(foundTx.id, status, {
+      transactionId: status === 'verified' ? (foundTx.transactionId || 'DES' + Math.floor(Math.random() * 900000 + 100000)) : foundTx.transactionId,
+      failReason: status === 'verified' ? null : (req.body.reason || req.body.error || 'Transaction rejected'),
+    });
+  }
 
   const txObj = {
     id: sessionId,
     userId: userId,
-    orderId: orderId,
-    requestedAmount: amount,
+    orderId: foundTx?.orderId || orderId,
+    requestedAmount: requestedAmt,
+    amount: requestedAmt,
+    platform: platform,
+    bank: bank,
     phoneNumber: phoneNumber,
-    transactionId: 'DES' + Math.floor(Math.random() * 900000 + 100000)
+    accountNumber: accountNumber,
+    transactionId: status === 'verified' ? (foundTx?.transactionId || 'DES' + Math.floor(Math.random() * 900000 + 100000)) : null,
+    failReason: status === 'verified' ? null : (req.body.reason || req.body.error || null)
   };
 
-  const payload = createWebhookPayload(txObj, status, status === 'verified' ? amount : 0);
+  const payload = createWebhookPayload(txObj, status, verifiedAmt, {}, req.body.reason || req.body.error || null);
   sendWebhookWithRetry(callbackUrl, payload);
 
   res.json({
     success: true,
     message: `Test callback sent to ${callbackUrl}`,
+    payload
+  });
+});
+
+// Explicit rejection endpoint preserving true requestedAmount
+router.post('/reject', (req, res) => {
+  const orderId = (req.body.orderId || req.body.order_id || req.body.sessionId || req.body.id || '').toString().trim();
+  const reason = req.body.reason || req.body.error || 'Transaction rejected';
+
+  if (!orderId) {
+    return res.status(400).json({ error: 'Missing orderId or sessionId' });
+  }
+
+  const foundTx = getTxByOrderId(orderId) || getTxById(orderId);
+  if (!foundTx) {
+    return res.status(404).json({ error: `Transaction ${orderId} not found` });
+  }
+
+  const updatedTx = updateTxStatus(foundTx.id, 'rejected', {
+    failReason: reason
+  });
+
+  const callbackUrl = req.body.callbackUrl || req.body.callback_url || updatedTx.callbackUrl || 'https://cbtestpayment.testenvh.com/CKPay/process';
+  const payload = createWebhookPayload(updatedTx, 'rejected', 0, {}, reason);
+  sendWebhookWithRetry(callbackUrl, payload);
+
+  res.json({
+    success: true,
+    message: `Transaction ${orderId} marked rejected and webhook dispatched`,
     payload
   });
 });
@@ -427,13 +486,13 @@ router.post('/init', (req, res) => {
   const platform = detectedPlatformFromToken || detectPlatform(req, tokenPayload);
   const settings = getPlatformSettings(platform);
 
-  // Support both CK-PAY and standard parameter names
-  const userId = req.body.userId || req.body.account_id || req.body.client_id || tokenPayload.userId || tokenPayload.account_id;
-  const amount = req.body.amount || tokenPayload.amount;
-  const orderId = req.body.orderId || req.body.order_id || req.body.merchant_order_id || tokenPayload.order_id || tokenPayload.orderId || null;
-  const returnUrl = req.body.returnUrl || req.body.return_url || req.body.success_url || tokenPayload.returnUrl || tokenPayload.return_url || null;
-  const callbackUrl = req.body.callbackUrl || req.body.callback_url || req.body.postback_url || tokenPayload.callbackUrl || tokenPayload.callback_url || null;
-  const forceNew = req.body.forceNew;
+  // Support both CK-PAY and standard parameter names across body, token, and query
+  const userId = req.body.userId || req.body.account_id || req.body.client_id || tokenPayload.userId || tokenPayload.account_id || tokenPayload.id || req.query.userId || req.query.account_id || req.query.client_id;
+  const amount = req.body.amount || tokenPayload.amount || req.query.amount;
+  const orderId = req.body.orderId || req.body.order_id || req.body.merchant_order_id || req.body.merchantOrderId || tokenPayload.order_id || tokenPayload.orderId || tokenPayload.merchant_order_id || req.query.orderId || req.query.order_id || null;
+  const returnUrl = req.body.returnUrl || req.body.return_url || req.body.success_url || tokenPayload.returnUrl || tokenPayload.return_url || req.query.returnUrl || req.query.return_url || null;
+  const callbackUrl = req.body.callbackUrl || req.body.callback_url || req.body.postback_url || tokenPayload.callbackUrl || tokenPayload.callback_url || req.query.callbackUrl || req.query.callback_url || null;
+  const forceNew = req.body.forceNew || req.query.forceNew;
 
   if (!userId || !amount) {
     return res.status(400).json({ error: 'Missing userId (or account_id) or amount' });
