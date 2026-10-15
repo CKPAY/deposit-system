@@ -41,6 +41,7 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_userId ON transactions(userId);
   CREATE INDEX IF NOT EXISTS idx_status ON transactions(status);
   CREATE INDEX IF NOT EXISTS idx_transactionId ON transactions(transactionId);
+  CREATE INDEX IF NOT EXISTS idx_orderId ON transactions(orderId);
 
   CREATE TABLE IF NOT EXISTS withdrawals (
     id TEXT PRIMARY KEY,
@@ -158,7 +159,9 @@ function saveTx(tx) {
 }
 
 function getTxById(id) {
-  const row = db.prepare(`SELECT * FROM transactions WHERE id = ?`).get(id);
+  if (!id) return null;
+  const clean = String(id).trim();
+  const row = db.prepare(`SELECT * FROM transactions WHERE id = ? COLLATE NOCASE OR orderId = ? COLLATE NOCASE`).get(clean, clean);
   if (!row) return null;
   return {
     ...row,
@@ -180,7 +183,8 @@ function getTxByCleanTxId(txId) {
 
 function getTxByOrderId(orderId) {
   if (!orderId) return null;
-  const row = db.prepare(`SELECT * FROM transactions WHERE orderId = ? ORDER BY createdAt DESC LIMIT 1`).get(String(orderId));
+  const clean = String(orderId).trim();
+  const row = db.prepare(`SELECT * FROM transactions WHERE orderId = ? COLLATE NOCASE OR id = ? COLLATE NOCASE ORDER BY createdAt DESC LIMIT 1`).get(clean, clean);
   if (!row) return null;
   return {
     ...row,
