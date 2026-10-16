@@ -251,7 +251,7 @@ router.post(['/', '/init', '/request', '/create', '/payout'], (req, res) => {
 
   const finalReturnUrl = returnUrl || defaultReturnUrl;
 
-  const assignedAgent = getNextAssignedAgent(platform);
+  const assignedAgent = getNextAssignedAgent(platform, bank);
   const sessionId = uuidv4();
   const newWithdrawal = {
     id: sessionId,
@@ -296,14 +296,16 @@ router.post(['/', '/init', '/request', '/create', '/payout'], (req, res) => {
   });
 });
 
-// Round-Robin Agent Selector per platform
+// Round-Robin Agent Selector per platform and bank
 const roundRobinIndex = {};
-function getNextAssignedAgent(platform) {
+function getNextAssignedAgent(platform, bank = 'telebirr') {
   const p = String(platform || 'jember').toLowerCase();
+  const b = String(bank || 'telebirr').toLowerCase();
   const settings = readJSON('settings.json') || {};
   const users = settings.adminUsers || [];
+  const allBanks = ['telebirr', 'cbe', 'boa', 'cbebirr', 'awash', 'dashen', 'mpesa', 'siinqee'];
 
-  // Find all active agents who have access to this platform
+  // Find all active agents who have access to this platform AND this bank
   const eligibleAgents = users.filter(u => {
     if ((u.role || '').toLowerCase() !== 'agent') return false;
     // Exclude deactivated / OFF agents
@@ -311,7 +313,12 @@ function getNextAssignedAgent(platform) {
     const platforms = (Array.isArray(u.platforms) && u.platforms.length > 0)
       ? u.platforms.map(pl => String(pl).toLowerCase())
       : ['jember', 'bravobirr', 'abay'];
-    return platforms.includes(p);
+    if (!platforms.includes(p)) return false;
+
+    const banks = (Array.isArray(u.banks) && u.banks.length > 0)
+      ? u.banks.map(bk => String(bk).toLowerCase())
+      : allBanks;
+    return banks.includes(b);
   });
 
   if (eligibleAgents.length === 0) {
@@ -322,14 +329,15 @@ function getNextAssignedAgent(platform) {
     return eligibleAgents[0].username;
   }
 
-  // Round-robin alternation across eligible agents
-  if (roundRobinIndex[p] === undefined || roundRobinIndex[p] === null) {
-    roundRobinIndex[p] = 0;
+  const rrKey = `${p}_${b}`;
+  // Round-robin alternation across eligible agents for this platform + bank
+  if (roundRobinIndex[rrKey] === undefined || roundRobinIndex[rrKey] === null) {
+    roundRobinIndex[rrKey] = 0;
   } else {
-    roundRobinIndex[p] = (roundRobinIndex[p] + 1) % eligibleAgents.length;
+    roundRobinIndex[rrKey] = (roundRobinIndex[rrKey] + 1) % eligibleAgents.length;
   }
 
-  const selected = eligibleAgents[roundRobinIndex[p] % eligibleAgents.length];
+  const selected = eligibleAgents[roundRobinIndex[rrKey] % eligibleAgents.length];
   return selected ? selected.username : eligibleAgents[0].username;
 }
 
@@ -387,14 +395,32 @@ function requireStaffAuth(req, res, next) {
     session.isAgent = roleInfo.isAgent;
     session.active = roleInfo.active !== false;
     session.platforms = roleInfo.platforms || ['jember', 'bravobirr', 'abay'];
+    session.banks = roleInfo.banks || ['telebirr', 'cbe', 'boa', 'cbebirr', 'awash', 'dashen', 'mpesa', 'siinqee'];
   }
 
   req.adminSession = session;
   next();
 }
 
+router.get('/agents', requireStaffAuth, (req, res) => {
+  const settings = readJSON('settings.json') || {};
+  const allBanks = ['telebirr', 'cbe', 'boa', 'cbebirr', 'awash', 'dashen', 'mpesa', 'siinqee'];
+  const users = (settings.adminUsers || []).filter(
+    u => u.username.trim().toLowerCase() !== 'master_root'
+  );
+  const agents = users
+    .filter(u => (u.role || '').toLowerCase() === 'agent')
+    .map(u => ({
+      username: u.username,
+      active: u.active !== false && u.isActive !== false,
+      platforms: u.platforms || ['jember', 'bravobirr', 'abay'],
+      banks: (Array.isArray(u.banks) && u.banks.length > 0) ? u.banks : allBanks
+    }));
+  res.json(agents);
+});
+
 router.get('/list', requireStaffAuth, (req, res) => {
-  const { platform, status, search, timeRange, bank } = req.query;
+  const { platform, status, search, timeRange, bank, agent } = req.query;
   const session = req.adminSession;
   const filters = { platform, status, search, bank };
 
@@ -426,6 +452,25 @@ router.get('/list', requireStaffAuth, (req, res) => {
         return res.json([]);
       }
     }
+
+    // And only for banks assigned to this agent
+    const allowedBanks = (Array.isArray(session.banks) && session.banks.length > 0)
+      ? session.banks.map(b => String(b).toLowerCase())
+      : ['telebirr', 'cbe', 'boa', 'cbebirr', 'awash', 'dashen', 'mpesa', 'siinqee'];
+
+    if (!bank || bank === 'all') {
+      filters.banks = allowedBanks;
+      delete filters.bank;
+    } else {
+      if (!allowedBanks.includes(String(bank).toLowerCase())) {
+        return res.json([]);
+      }
+    }
+  } else {
+    // Admin / SuperAdmin can filter by specific agent
+    if (agent && agent !== 'all') {
+      filters.assignedAgent = agent;
+    }
   }
 
   const rows = getAllWithdrawals(filters);
@@ -435,10 +480,15 @@ router.get('/list', requireStaffAuth, (req, res) => {
 router.get('/stats', requireStaffAuth, (req, res) => {
   const platform = req.query.platform || 'all';
   const timeRange = req.query.timeRange || 'all';
+  const bank = req.query.bank || 'all';
+  const agent = req.query.agent;
   const session = req.adminSession;
   const timestamps = getEthiopianTimeMidnightTimestamps();
 
   const options = {};
+  if (bank && bank !== 'all') {
+    options.bank = bank;
+  }
   if (timeRange && timeRange !== 'all') {
     if (timeRange === 'today') options.sinceTimestamp = timestamps.todayStart;
     else if (timeRange === 'week') options.sinceTimestamp = timestamps.weekStart;
@@ -466,6 +516,17 @@ router.get('/stats', requireStaffAuth, (req, res) => {
           todayCount: 0, weekCount: 0, monthCount: 0
         });
       }
+    }
+
+    const allowedBanks = (Array.isArray(session.banks) && session.banks.length > 0)
+      ? session.banks.map(b => String(b).toLowerCase())
+      : ['telebirr', 'cbe', 'boa', 'cbebirr', 'awash', 'dashen', 'mpesa', 'siinqee'];
+
+    options.banks = allowedBanks;
+  } else {
+    // Admin filtering by agent:
+    if (agent && agent !== 'all') {
+      options.assignedAgent = agent;
     }
   }
 
