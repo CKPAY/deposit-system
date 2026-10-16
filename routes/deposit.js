@@ -139,6 +139,7 @@ function getPlatformSettings(platform = 'jember') {
   if (raw.platforms && raw.platforms[p]) {
     return {
       ...raw.platforms[p],
+      bankVerificationMethod: raw.platforms[p].bankVerificationMethod || 'copy_paste',
       adminUsers: raw.adminUsers || [],
       whitelistedIPs: raw.whitelistedIPs || []
     };
@@ -152,6 +153,7 @@ function getPlatformSettings(platform = 'jember') {
     currency: raw.currency || 'ETB',
     verifyApiKey: raw.verifyApiKey || '',
     apiKeys: raw.apiKeys || ['', '', '', '', ''],
+    bankVerificationMethod: 'copy_paste',
     adminUsers: raw.adminUsers || [],
     whitelistedIPs: raw.whitelistedIPs || []
   };
@@ -453,11 +455,13 @@ router.get('/active-banks', (req, res) => {
 
   // Bank is enabled if status[b] !== false
   const activeBanks = SUPPORTED_7_BANKS.filter(b => status[b] !== false);
+  const settings = getPlatformSettings(p);
 
   res.json({
     platform: p,
     activeBanks,
-    status
+    status,
+    bankVerificationMethod: settings.bankVerificationMethod || 'copy_paste'
   });
 });
 
@@ -583,6 +587,7 @@ router.post('/init', (req, res) => {
         accountNumber: activeSession.accountNumber || activeSession.phoneNumber,
         amount: activeSession.amount,
         requestedAmount: activeSession.requestedAmount || activeSession.amount,
+        bankVerificationMethod: settings.bankVerificationMethod || 'copy_paste',
         expiresAt: activeSession.expiresAt,
         sessionExpiry: settings.sessionExpiry,
         currency: settings.currency,
@@ -630,6 +635,7 @@ router.post('/init', (req, res) => {
     accountNumber: newTxObj.accountNumber || newTxObj.phoneNumber,
     amount: amt,
     requestedAmount: amt,
+    bankVerificationMethod: settings.bankVerificationMethod || 'copy_paste',
     expiresAt,
     sessionExpiry: settings.sessionExpiry,
     currency: settings.currency,
@@ -897,6 +903,135 @@ async function verifyWithVerifyEtMultiKey(settings, transactionId, targetPhoneNu
   };
 }
 
+async function verifyWithVerifyEtScreenshot(apiKey, imageBuffer, mimeType, bank, receivingAccount, sessionId) {
+  try {
+    const form = new FormData();
+    const ext = mimeType.includes('png') ? 'png' : mimeType.includes('webp') ? 'webp' : 'jpg';
+    form.append('image', new Blob([imageBuffer], { type: mimeType }), `receipt_${sessionId}.${ext}`);
+    if (bank && bank !== 'telebirr') {
+      form.append('bank', String(bank).toLowerCase());
+    }
+    if (receivingAccount) {
+      form.append('settlementAccount', String(receivingAccount).trim());
+    }
+
+    const idempotencyKey = `dep_img_${sessionId}_${Date.now()}`.slice(0, 100);
+
+    const res = await fetch('https://verify.et/api/verify', {
+      method: 'POST',
+      headers: {
+        'x-api-key': apiKey,
+        'Idempotency-Key': idempotencyKey,
+      },
+      body: form,
+      signal: AbortSignal.timeout(45000),
+    });
+
+    const data = await res.json();
+
+    if (res.status === 202 && data.requestId) {
+      return await pollVerifyEtStatus(apiKey, data.requestId);
+    }
+
+    if (!res.ok && !data.success) {
+      let msg = data.message || 'Image verification failed on verify.et';
+      if (data.code === 'INSUFFICIENT_IMAGE_CREDITS') {
+        msg = 'Insufficient Verify.ET image credits. Please top up image credits on Verify.ET dashboard.';
+      } else if (data.code === 'IMAGE_PROCESSING_DISABLED') {
+        msg = 'Image processing is disabled on Verify.ET dashboard. Please enable it in API keys settings.';
+      } else if (data.code === 'IMAGE_FIELD_CONFLICT') {
+        msg = 'The receipt screenshot does not match the chosen bank or account.';
+      }
+      return {
+        success: false,
+        message: msg,
+        code: data.code || 'VERIFICATION_FAILED',
+      };
+    }
+
+    const rawData = (Array.isArray(data.data) && data.data.length > 0) ? data.data[0] : (data.data || {});
+    const resObj = rawData.result || rawData;
+    const isVerified = rawData.verified === true || resObj.verified === true || rawData.status === 'success' || resObj.status === 'success' || data.verification?.verified === true;
+
+    if (!isVerified) {
+      return {
+        success: false,
+        message: data.message || rawData.message || resObj.message || 'Transaction could not be verified from the screenshot.',
+      };
+    }
+
+    const receiverAcc = resObj.receiverAccount || resObj.bankSpecific?.receiverAccount || resObj.creditedPartyAccountNo || rawData.receiverAccount || '';
+    const amt = resObj.amount !== undefined ? resObj.amount : (resObj.amountValue !== undefined ? resObj.amountValue : (rawData.amount || '0'));
+    const sender = resObj.senderName || resObj.payerName || rawData.senderName || 'Bank Customer';
+    const receiver = resObj.receiverName || resObj.creditedPartyName || rawData.receiverName || 'Merchant';
+    const txNum = resObj.transactionNumber || resObj.referenceNumber || resObj.receiptNumber || rawData.transactionNumber || rawData.reference || `IMG-${Date.now().toString().slice(-8)}`;
+    const methodUsed = data.imageProcessing?.method || rawData.imageProcessing?.method || 'screenshot';
+
+    return {
+      success: true,
+      message: `Transaction verified successfully via ${methodUsed.toUpperCase()}.`,
+      method: methodUsed,
+      receipt: {
+        transactionId: txNum,
+        status: 'VERIFIED',
+        payer: sender,
+        receiver: receiver,
+        amount: String(amt),
+        date: resObj.timestamp || rawData.date || new Date().toISOString(),
+        creditedAccount: receiverAcc,
+      },
+    };
+  } catch (err) {
+    console.error('[Verify Screenshot] Network/Fetch error:', err.message);
+    return {
+      success: false,
+      message: 'The verify.et service is temporarily unavailable or timed out. Please try again.',
+      code: 'NETWORK_FAILED',
+    };
+  }
+}
+
+async function verifyWithVerifyEtScreenshotMultiKey(settings, imageBuffer, mimeType, platform = 'jember', bank = 'cbe', receivingAccount = '', sessionId = '') {
+  const b = String(bank || 'cbe').toLowerCase();
+  const apiKeys = Array.isArray(settings.apiKeys) ? settings.apiKeys : [];
+
+  const keysToTry = [];
+  apiKeys.forEach(k => {
+    if (k && k.trim() && !k.includes('_placeholder') && !keysToTry.includes(k.trim())) {
+      keysToTry.push(k.trim());
+    }
+  });
+  if (settings.verifyApiKey && settings.verifyApiKey.trim() && !keysToTry.includes(settings.verifyApiKey.trim())) {
+    keysToTry.push(settings.verifyApiKey.trim());
+  }
+
+  if (keysToTry.length === 0) {
+    return {
+      success: false,
+      message: 'Verification service is not configured for this platform. Please contact support.',
+      code: 'NO_API_KEY'
+    };
+  }
+
+  let lastResult = null;
+  for (const key of keysToTry) {
+    console.log(`[Verify Screenshot] Trying key on Verify.ET for bank (${b}), session:`, sessionId);
+    const result = await verifyWithVerifyEtScreenshot(key, imageBuffer, mimeType, b, receivingAccount, sessionId);
+    console.log('[Verify Screenshot] Result:', result.success, result.message, result.receipt?.creditedAccount);
+
+    if (result.success && result.receipt) {
+      return result;
+    }
+    lastResult = result;
+  }
+
+  return lastResult || {
+    success: false,
+    message: 'Could not verify the receipt screenshot on Verify.ET. Please try again or upload a clearer screenshot.',
+    code: 'VERIFICATION_FAILED'
+  };
+}
+
 router.post('/verify', (req, res) => {
   const { sessionId, transactionId } = req.body;
 
@@ -1032,6 +1167,178 @@ router.post('/verify', (req, res) => {
   });
 });
 
+// Verify Bank Deposit via Receipt Screenshot / QR Upload (STRICTLY for Banks, NOT Telebirr)
+router.post('/verify-screenshot', async (req, res) => {
+  const { sessionId, image } = req.body;
+
+  if (!sessionId) {
+    return res.status(400).json({ error: 'Missing sessionId' });
+  }
+
+  if (!image || typeof image !== 'string' || !image.trim()) {
+    return res.status(400).json({ error: 'Please upload a receipt screenshot' });
+  }
+
+  const tx = getTxById(sessionId);
+  if (!tx) {
+    return res.status(404).json({ error: 'Session not found' });
+  }
+
+  // STRICT REQUIREMENT: Screenshot verification is ONLY for banks, NOT Telebirr!
+  if (tx.bank === 'telebirr') {
+    return res.status(400).json({
+      error: 'Screenshot verification is only available for bank transfers. For Telebirr, please enter your transaction number.'
+    });
+  }
+
+  const platform = tx.platform || 'jember';
+
+  if (Date.now() > tx.expiresAt) {
+    updateTxStatus(sessionId, 'expired');
+    if (tx.callbackUrl) {
+      const payload = createWebhookPayload(tx, 'expired', 0, {}, 'Session has expired');
+      sendWebhookWithRetry(tx.callbackUrl, payload);
+    }
+    return res.status(400).json({ error: 'Session has expired' });
+  }
+
+  if (tx.status !== 'pending') {
+    return res.status(400).json({ error: 'Transaction already submitted or processing' });
+  }
+
+  // Parse base64 data
+  let mimeType = 'image/jpeg';
+  let base64Data = image;
+  const match = image.match(/^data:([A-Za-z0-9\/+.-]+);base64,(.+)$/);
+  if (match) {
+    mimeType = match[1];
+    base64Data = match[2];
+  }
+
+  const buffer = Buffer.from(base64Data, 'base64');
+  if (buffer.length > 8.5 * 1024 * 1024) {
+    return res.status(400).json({ error: 'Screenshot image must be under 8MB' });
+  }
+
+  // Save screenshot locally to uploads/screenshots directory
+  let savedImageUrl = null;
+  try {
+    const screenshotsDir = path.join(dataDir, 'screenshots');
+    if (!fs.existsSync(screenshotsDir)) {
+      fs.mkdirSync(screenshotsDir, { recursive: true });
+    }
+    const ext = mimeType.includes('png') ? 'png' : mimeType.includes('webp') ? 'webp' : 'jpg';
+    const filename = `dep_${sessionId}_${Date.now()}.${ext}`;
+    fs.writeFileSync(path.join(screenshotsDir, filename), buffer);
+    savedImageUrl = `/screenshots/${filename}`;
+  } catch (err) {
+    console.warn('[Screenshot] Could not save screenshot locally:', err.message);
+  }
+
+  updateTxStatus(sessionId, 'processing', {
+    submittedAt: Date.now(),
+    receiptImage: savedImageUrl
+  });
+
+  const settings = getPlatformSettings(platform);
+  const targetAccount = tx.accountNumber || tx.phoneNumber;
+
+  // Process verification asynchronously in background
+  (async () => {
+    try {
+      const result = await verifyWithVerifyEtScreenshotMultiKey(
+        settings,
+        buffer,
+        mimeType,
+        platform,
+        tx.bank,
+        targetAccount,
+        sessionId
+      );
+
+      console.log('[Verify Screenshot] Outcome:', result.success, result.message, result.receipt);
+      const currentTx = getTxById(sessionId);
+
+      if (currentTx) {
+        if (result.success && result.receipt) {
+          const rawAmt = result.receipt.amount || '0';
+          const parsedAmt = parseFloat(String(rawAmt).replace(/[^0-9.]/g, '')) || currentTx.amount;
+
+          const minDeposit = settings.minDeposit || 100;
+          const maxDeposit = settings.maxDeposit || 50000;
+
+          if (parsedAmt < minDeposit) {
+            updateTxStatus(sessionId, 'pending', {
+              transactionId: null,
+              submittedAt: null,
+              failReason: `Amount (${parsedAmt.toFixed(2)} ETB) is below the minimum deposit of ${minDeposit} ETB. Please try again.`
+            });
+            return;
+          }
+
+          if (parsedAmt > maxDeposit) {
+            updateTxStatus(sessionId, 'pending', {
+              transactionId: null,
+              submittedAt: null,
+              failReason: `Amount (${parsedAmt.toFixed(2)} ETB) exceeds the maximum deposit of ${maxDeposit} ETB.`
+            });
+            return;
+          }
+
+          const verifiedTxId = (result.receipt && (result.receipt.transactionId || result.receipt.receiptNumber)) || `IMG-${Date.now().toString().slice(-8)}`;
+
+          // Anti-fraud duplicate check on extracted transaction ID
+          if (verifiedTxId) {
+            const alreadyUsed = getTxByCleanTxId(verifiedTxId);
+            if (alreadyUsed && alreadyUsed.id !== sessionId) {
+              updateTxStatus(sessionId, 'pending', {
+                transactionId: null,
+                submittedAt: null,
+                failReason: 'This transaction receipt has already been verified and credited.'
+              });
+              return;
+            }
+          }
+
+          const updatedTx = updateTxStatus(sessionId, 'verified', {
+            transactionId: verifiedTxId,
+            amount: parsedAmt,
+            verifiedAmount: parsedAmt,
+            failReason: null,
+            receipt: result.receipt,
+            receiptImage: savedImageUrl
+          });
+
+          // Webhook Callback with HMAC-SHA256 Signature Verification & Retries
+          if (updatedTx && updatedTx.callbackUrl) {
+            const payload = createWebhookPayload(updatedTx, 'verified', parsedAmt, result.receipt);
+            sendWebhookWithRetry(updatedTx.callbackUrl, payload);
+          }
+        } else {
+          updateTxStatus(sessionId, 'pending', {
+            transactionId: null,
+            submittedAt: null,
+            failReason: result.message || 'Receipt screenshot verification failed. Please try again with a clearer image.'
+          });
+        }
+      }
+    } catch (err) {
+      console.error('[Verify Screenshot] Error:', err.message);
+      updateTxStatus(sessionId, 'pending', {
+        transactionId: null,
+        submittedAt: null,
+        failReason: 'Verification error occurred. Please try again.'
+      });
+    }
+  })();
+
+  res.json({
+    success: true,
+    status: 'processing',
+    sessionId
+  });
+});
+
 router.post('/fail', (req, res) => {
   const { sessionId, reason } = req.body;
 
@@ -1063,6 +1370,7 @@ router.get('/session/:sessionId', (req, res) => {
     accountNumber: tx.accountNumber || tx.phoneNumber || null,
     amount: tx.amount,
     requestedAmount: tx.requestedAmount || tx.amount,
+    bankVerificationMethod: settings.bankVerificationMethod || 'copy_paste',
     expiresAt: tx.expiresAt,
     sessionExpiry: settings.sessionExpiry || 20,
     currency: settings.currency || 'ETB',
@@ -1072,25 +1380,30 @@ router.get('/session/:sessionId', (req, res) => {
     callbackUrl: tx.callbackUrl || null,
     transactionId: tx.transactionId || null,
     failReason: tx.failReason || null,
+    receiptImage: tx.receiptImage || null,
   });
 });
 
 router.get('/status/:sessionId', (req, res) => {
   const tx = getTxById(req.params.sessionId);
   if (!tx) return res.status(404).json({ error: 'Not found' });
+  const platform = tx.platform || 'jember';
+  const settings = getPlatformSettings(platform);
   res.json({
     status: tx.status,
-    platform: tx.platform || 'jember',
+    platform: platform,
     bank: tx.bank || 'telebirr',
     amount: tx.amount,
     phoneNumber: tx.phoneNumber || null,
     accountNumber: tx.accountNumber || tx.phoneNumber || null,
     verifiedAmount: tx.verifiedAmount || tx.amount,
     requestedAmount: tx.requestedAmount || tx.amount,
+    bankVerificationMethod: settings.bankVerificationMethod || 'copy_paste',
     transactionId: tx.transactionId,
     failReason: tx.failReason || null,
     returnUrl: tx.returnUrl || null,
-    receipt: tx.receipt || null
+    receipt: tx.receipt || null,
+    receiptImage: tx.receiptImage || null
   });
 });
 
