@@ -13,6 +13,7 @@ function getPlatformSecret(platform = 'jember') {
   if (raw.platforms && raw.platforms[p] && raw.platforms[p].jwtSecret) {
     return raw.platforms[p].jwtSecret;
   }
+  if (p === 'walta') return 'd0ee8f6ffc6f56f367d9a943a076bc5996e23eea9ae7496110761a3a508fb41d';
   if (p === 'bravobirr') return '6c4cc37b91b419beba46e4d950199a02b8f99c1e4e0ace11ff01999a4dd7c6fe';
   if (p === 'abay') return '7f97e97c37042d344dd3be0371b3f490e3e7e2b5c7f226bbde726271dd9fa366';
   return process.env.JWT_SECRET || '4fec6686d2b93ceca92531ed08dbdc48cf0b937965ebbf51b144d8f055f5d004fd85c8518ef72a1d61634949884c4346';
@@ -120,7 +121,7 @@ function normalizePhone(p) {
 
 function detectPlatform(req, tokenPayload = {}) {
   const explicit = req.body?.platform || req.query?.platform || tokenPayload?.platform;
-  if (explicit && ['jember', 'bravobirr', 'abay'].includes(String(explicit).toLowerCase())) {
+  if (explicit && ['jember', 'bravobirr', 'abay', 'walta'].includes(String(explicit).toLowerCase())) {
     return String(explicit).toLowerCase();
   }
   const returnUrl = req.body?.returnUrl || req.body?.return_url || tokenPayload?.returnUrl || tokenPayload?.return_url || '';
@@ -128,6 +129,7 @@ function detectPlatform(req, tokenPayload = {}) {
   const referer = req.headers?.['referer'] || req.headers?.['origin'] || '';
   const combined = `${returnUrl} ${callbackUrl} ${referer}`.toLowerCase();
 
+  if (combined.includes('walta')) return 'walta';
   if (combined.includes('bravobirr')) return 'bravobirr';
   if (combined.includes('abaybet') || combined.includes('abay.bet') || combined.includes('abay')) return 'abay';
   return 'jember';
@@ -145,7 +147,7 @@ function getPlatformSettings(platform = 'jember') {
     };
   }
   return {
-    siteName: p === 'bravobirr' ? 'BravoBirr Bet' : p === 'abay' ? 'Abay Bet' : 'Jember Bet',
+    siteName: p === 'walta' ? 'Walta Bet' : p === 'bravobirr' ? 'BravoBirr Bet' : p === 'abay' ? 'Abay Bet' : 'Jember Bet',
     minDeposit: raw.minDeposit || 100,
     maxDeposit: raw.maxDeposit || 50000,
     sessionExpiry: raw.sessionExpiry || 20,
@@ -471,8 +473,8 @@ router.post('/init', (req, res) => {
   const rawToken = req.body.token || req.headers['x-ckpay-token'] || null;
 
   if (rawToken) {
-    // Check against each platform secret (jember, bravobirr, abay)
-    for (const plat of ['jember', 'bravobirr', 'abay']) {
+    // Check against each platform secret (jember, bravobirr, abay, walta)
+    for (const plat of ['jember', 'bravobirr', 'abay', 'walta']) {
       try {
         const sec = getPlatformSecret(plat);
         tokenPayload = jwt.verify(rawToken, sec);
