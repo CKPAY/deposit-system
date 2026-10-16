@@ -532,7 +532,8 @@ router.get('/settings', requireAdminRole, (req, res) => {
     depositEnabled: settings.depositEnabled !== false,
     currency: settings.currency || 'ETB',
     verifyApiKey: settings.verifyApiKey || '',
-    apiKeys: settings.apiKeys || ['', '', '', '', '']
+    apiKeys: settings.apiKeys || ['', '', '', '', ''],
+    bankVerificationMethod: platformConfig.bankVerificationMethod || 'copy_paste'
   };
 
   res.json({
@@ -546,9 +547,22 @@ router.get('/settings', requireAdminRole, (req, res) => {
     currency: platformConfig.currency || 'ETB',
     verifyApiKey: platformConfig.verifyApiKey || '',
     apiKeys: platformConfig.apiKeys || ['', '', '', '', ''],
+    bankVerificationMethod: platformConfig.bankVerificationMethod || 'copy_paste',
     adminUsers: visibleUsers,
     whitelistedIPs: settings.whitelistedIPs || []
   });
+});
+
+router.put('/bank-verification-method', requireAdminRole, (req, res) => {
+  const platform = req.body.platform || req.query.platform || 'jember';
+  const p = String(platform).toLowerCase();
+  const method = req.body.bankVerificationMethod === 'screenshot' ? 'screenshot' : 'copy_paste';
+  const current = readJSON('settings.json') || {};
+  if (!current.platforms) current.platforms = {};
+  if (!current.platforms[p]) current.platforms[p] = {};
+  current.platforms[p].bankVerificationMethod = method;
+  writeJSON('settings.json', current);
+  res.json({ success: true, platform: p, bankVerificationMethod: method });
 });
 
 router.put('/settings', requireAdminRole, (req, res) => {
@@ -570,6 +584,9 @@ router.put('/settings', requireAdminRole, (req, res) => {
   if (req.body.siteName !== undefined) current.platforms[p].siteName = req.body.siteName;
   if (req.body.verifyApiKey !== undefined) current.platforms[p].verifyApiKey = req.body.verifyApiKey.trim();
   if (Array.isArray(req.body.apiKeys)) current.platforms[p].apiKeys = req.body.apiKeys.map(k => (k || '').trim());
+  if (req.body.bankVerificationMethod !== undefined) {
+    current.platforms[p].bankVerificationMethod = req.body.bankVerificationMethod === 'screenshot' ? 'screenshot' : 'copy_paste';
+  }
 
   // Global settings (whitelistedIPs and adminUsers)
   if (Array.isArray(req.body.whitelistedIPs)) {
