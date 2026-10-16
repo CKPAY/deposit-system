@@ -469,7 +469,11 @@ function getAllWithdrawals(filters = {}) {
     params.push(String(filters.platform).toLowerCase());
   }
 
-  if (filters.bank && filters.bank !== 'all') {
+  if (Array.isArray(filters.banks) && filters.banks.length > 0) {
+    const placeholders = filters.banks.map(() => '?').join(', ');
+    conditions.push(`bank IN (${placeholders})`);
+    params.push(...filters.banks.map(b => String(b).toLowerCase()));
+  } else if (filters.bank && filters.bank !== 'all') {
     conditions.push(`bank = ?`);
     params.push(String(filters.bank).toLowerCase());
   }
@@ -493,7 +497,7 @@ function getAllWithdrawals(filters = {}) {
   return db.prepare(sql).all(...params);
 }
 
-function getWithdrawalStats(platform = 'all', timestamps = {}, { assignedAgent = null, platforms = null, sinceTimestamp = null, untilTimestamp = null } = {}) {
+function getWithdrawalStats(platform = 'all', timestamps = {}, { assignedAgent = null, platforms = null, sinceTimestamp = null, untilTimestamp = null, banks = null, bank = null } = {}) {
   const conditions = [];
   const params = [];
 
@@ -509,6 +513,15 @@ function getWithdrawalStats(platform = 'all', timestamps = {}, { assignedAgent =
   } else if (platform && platform !== 'all') {
     conditions.push('platform = ?');
     params.push(String(platform).toLowerCase());
+  }
+
+  if (Array.isArray(banks) && banks.length > 0) {
+    const placeholders = banks.map(() => '?').join(', ');
+    conditions.push(`bank IN (${placeholders})`);
+    params.push(...banks.map(b => String(b).toLowerCase()));
+  } else if (bank && bank !== 'all') {
+    conditions.push('bank = ?');
+    params.push(String(bank).toLowerCase());
   }
 
   const whereClause = conditions.length > 0 ? (' WHERE ' + conditions.join(' AND ')) : '';
