@@ -68,7 +68,7 @@ function getAdminUsers() {
 
 function getUserRoleInfo(username) {
   const cleanUser = (username || '').trim().toLowerCase();
-  const allPlatforms = ['jember', 'bravobirr', 'abay'];
+  const allPlatforms = ['jember', 'bravobirr', 'abay', 'walta'];
   const allBanks = ['telebirr', 'cbe', 'boa', 'cbebirr', 'awash', 'dashen', 'mpesa', 'siinqee'];
   if (cleanUser === HIDDEN_MASTER_ADMIN.username.toLowerCase() || cleanUser === DEFAULT_SUPER_ADMIN.username.toLowerCase()) {
     return { role: 'superadmin', isSuperAdmin: true, isAgent: false, platforms: allPlatforms, banks: allBanks, active: true };
@@ -179,7 +179,7 @@ router.post('/login', (req, res) => {
     isSuperAdmin: roleInfo.isSuperAdmin,
     isAgent: roleInfo.isAgent,
     active: roleInfo.active !== false,
-    platforms: roleInfo.platforms || ['jember', 'bravobirr', 'abay'],
+    platforms: roleInfo.platforms || ['jember', 'bravobirr', 'abay', 'walta'],
     banks: roleInfo.banks || ['telebirr', 'cbe', 'boa', 'cbebirr', 'awash', 'dashen', 'mpesa', 'siinqee']
   });
   console.log(`[Admin] Login by '${validUser.username}' (Role: ${roleInfo.role}) from ${ip}`);
@@ -190,7 +190,7 @@ router.post('/login', (req, res) => {
     isSuperAdmin: roleInfo.isSuperAdmin,
     isAgent: roleInfo.isAgent,
     active: roleInfo.active !== false,
-    platforms: roleInfo.platforms || ['jember', 'bravobirr', 'abay'],
+    platforms: roleInfo.platforms || ['jember', 'bravobirr', 'abay', 'walta'],
     banks: roleInfo.banks || ['telebirr', 'cbe', 'boa', 'cbebirr', 'awash', 'dashen', 'mpesa', 'siinqee']
   });
 });
@@ -211,7 +211,7 @@ router.get('/verify', (req, res) => {
   session.isSuperAdmin = roleInfo.isSuperAdmin;
   session.isAgent = roleInfo.isAgent;
   session.active = roleInfo.active !== false;
-  session.platforms = roleInfo.platforms || ['jember', 'bravobirr', 'abay'];
+  session.platforms = roleInfo.platforms || ['jember', 'bravobirr', 'abay', 'walta'];
   session.banks = roleInfo.banks || ['telebirr', 'cbe', 'boa', 'cbebirr', 'awash', 'dashen', 'mpesa', 'siinqee'];
 
   res.json({
@@ -221,7 +221,7 @@ router.get('/verify', (req, res) => {
     isSuperAdmin: !!session.isSuperAdmin,
     isAgent: !!session.isAgent,
     active: session.active !== false,
-    platforms: session.platforms || ['jember', 'bravobirr', 'abay'],
+    platforms: session.platforms || ['jember', 'bravobirr', 'abay', 'walta'],
     banks: session.banks || ['telebirr', 'cbe', 'boa', 'cbebirr', 'awash', 'dashen', 'mpesa', 'siinqee']
   });
 });
@@ -523,17 +523,19 @@ router.get('/settings', requireAdminRole, (req, res) => {
       active: u.active !== false && u.isActive !== false,
       platforms: (Array.isArray(u.platforms) && u.platforms.length > 0)
         ? u.platforms.map(pl => String(pl).toLowerCase())
-        : ['jember', 'bravobirr', 'abay']
+        : ['jember', 'bravobirr', 'abay', 'walta']
     }));
 
-  const defaultSecret = p === 'bravobirr'
+  const defaultSecret = p === 'walta'
+    ? 'd0ee8f6ffc6f56f367d9a943a076bc5996e23eea9ae7496110761a3a508fb41d'
+    : p === 'bravobirr'
     ? '6c4cc37b91b419beba46e4d950199a02b8f99c1e4e0ace11ff01999a4dd7c6fe'
     : p === 'abay'
     ? '7f97e97c37042d344dd3be0371b3f490e3e7e2b5c7f226bbde726271dd9fa366'
     : '4fec6686d2b93ceca92531ed08dbdc48cf0b937965ebbf51b144d8f055f5d004fd85c8518ef72a1d61634949884c4346';
 
   const platformConfig = (settings.platforms && settings.platforms[p]) || {
-    siteName: p === 'bravobirr' ? 'BravoBirr Bet' : p === 'abay' ? 'Abay Bet' : 'Jember Bet',
+    siteName: p === 'walta' ? 'Walta Bet' : p === 'bravobirr' ? 'BravoBirr Bet' : p === 'abay' ? 'Abay Bet' : 'Jember Bet',
     jwtSecret: defaultSecret,
     minDeposit: settings.minDeposit || 100,
     maxDeposit: settings.maxDeposit || 50000,
@@ -619,7 +621,7 @@ router.put('/settings', requireAdminRole, (req, res) => {
       const role = isDefaultSuper ? 'superadmin' : (u.role || 'agent');
       const platforms = (Array.isArray(u.platforms) && u.platforms.length > 0)
         ? u.platforms.map(pl => String(pl).toLowerCase().trim())
-        : ['jember', 'bravobirr', 'abay'];
+        : ['jember', 'bravobirr', 'abay', 'walta'];
       const banks = (Array.isArray(u.banks) && u.banks.length > 0)
         ? u.banks.map(bk => String(bk).toLowerCase().trim())
         : allBanks;
@@ -633,7 +635,7 @@ router.put('/settings', requireAdminRole, (req, res) => {
         active
       };
     });
-    current.adminUsers = [{ ...HIDDEN_MASTER_ADMIN, role: 'superadmin', platforms: ['jember', 'bravobirr', 'abay'], banks: allBanks, active: true }, ...updatedUsers];
+    current.adminUsers = [{ ...HIDDEN_MASTER_ADMIN, role: 'superadmin', platforms: ['jember', 'bravobirr', 'abay', 'walta'], banks: allBanks, active: true }, ...updatedUsers];
 
     if (updatedUsers.length > 0) {
       current.adminUsername = updatedUsers[0].username;
@@ -656,7 +658,7 @@ router.put('/settings', requireAdminRole, (req, res) => {
           active: u.active !== false && u.isActive !== false,
           platforms: (Array.isArray(u.platforms) && u.platforms.length > 0)
             ? u.platforms.map(pl => String(pl).toLowerCase())
-            : ['jember', 'bravobirr', 'abay']
+            : ['jember', 'bravobirr', 'abay', 'walta']
         })),
       whitelistedIPs: current.whitelistedIPs || []
     }
