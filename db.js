@@ -90,6 +90,10 @@ try {
   if (!hasAccountNumber) {
     db.exec(`ALTER TABLE transactions ADD COLUMN accountNumber TEXT`);
   }
+  const hasTxReceiptImage = tableInfo.some(col => col.name === 'receiptImage');
+  if (!hasTxReceiptImage) {
+    db.exec(`ALTER TABLE transactions ADD COLUMN receiptImage TEXT`);
+  }
 
   const wTableInfo = db.prepare(`PRAGMA table_info(withdrawals)`).all();
   const hasAssignedAgent = wTableInfo.some(col => col.name === 'assignedAgent');
@@ -241,6 +245,10 @@ function updateTxStatus(id, status, updates = {}) {
   if (updates.phoneNumber !== undefined) {
     fields.push('phoneNumber = ?');
     params.push(String(updates.phoneNumber));
+  }
+  if (updates.receiptImage !== undefined) {
+    fields.push('receiptImage = ?');
+    params.push(updates.receiptImage || null);
   }
 
   params.push(String(id));
