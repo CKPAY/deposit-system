@@ -33,6 +33,7 @@ function getPlatformSecret(platform = 'jember') {
   if (raw.platforms && raw.platforms[p] && raw.platforms[p].jwtSecret) {
     return raw.platforms[p].jwtSecret;
   }
+  if (p === 'walta') return 'd0ee8f6ffc6f56f367d9a943a076bc5996e23eea9ae7496110761a3a508fb41d';
   if (p === 'bravobirr') return '6c4cc37b91b419beba46e4d950199a02b8f99c1e4e0ace11ff01999a4dd7c6fe';
   if (p === 'abay') return '7f97e97c37042d344dd3be0371b3f490e3e7e2b5c7f226bbde726271dd9fa366';
   return process.env.JWT_SECRET || '4fec6686d2b93ceca92531ed08dbdc48cf0b937965ebbf51b144d8f055f5d004fd85c8518ef72a1d61634949884c4346';
@@ -148,7 +149,7 @@ router.post(['/', '/init', '/request', '/create', '/payout'], (req, res) => {
   if (rawToken) {
     const raw = readJSON('settings.json') || {};
     const configuredPlatforms = Object.keys(raw.platforms || {});
-    const allPlatforms = Array.from(new Set(['jember', 'bravobirr', 'abay', ...configuredPlatforms]));
+    const allPlatforms = Array.from(new Set(['jember', 'bravobirr', 'abay', 'walta', ...configuredPlatforms]));
 
     for (const plat of allPlatforms) {
       try {
@@ -163,7 +164,7 @@ router.post(['/', '/init', '/request', '/create', '/payout'], (req, res) => {
       // Check if rawToken is actually the raw Secret Key directly
       const raw = readJSON('settings.json') || {};
       const configuredPlatforms = Object.keys(raw.platforms || {});
-      const allPlatforms = Array.from(new Set(['jember', 'bravobirr', 'abay', ...configuredPlatforms]));
+      const allPlatforms = Array.from(new Set(['jember', 'bravobirr', 'abay', 'walta', ...configuredPlatforms]));
       for (const plat of allPlatforms) {
         if (getPlatformSecret(plat) === String(rawToken).trim()) {
           detectedPlatform = plat;
@@ -181,7 +182,7 @@ router.post(['/', '/init', '/request', '/create', '/payout'], (req, res) => {
   if (directSecret && !detectedPlatform) {
     const raw = readJSON('settings.json') || {};
     const configuredPlatforms = Object.keys(raw.platforms || {});
-    const allPlatforms = Array.from(new Set(['jember', 'bravobirr', 'abay', ...configuredPlatforms]));
+    const allPlatforms = Array.from(new Set(['jember', 'bravobirr', 'abay', 'walta', ...configuredPlatforms]));
     for (const plat of allPlatforms) {
       if (getPlatformSecret(plat) === String(directSecret).trim()) {
         detectedPlatform = plat;
@@ -195,8 +196,9 @@ router.post(['/', '/init', '/request', '/create', '/payout'], (req, res) => {
   const callbackUrl = req.body.callbackUrl || req.body.callback_url || tokenPayload.callbackUrl || tokenPayload.callback_url || '';
 
   const platform = detectedPlatform || (
-    explicitPlat && ['jember', 'bravobirr', 'abay'].includes(String(explicitPlat).toLowerCase())
+    explicitPlat && ['jember', 'bravobirr', 'abay', 'walta'].includes(String(explicitPlat).toLowerCase())
       ? String(explicitPlat).toLowerCase()
+      : (returnUrl + ' ' + callbackUrl).includes('walta') ? 'walta'
       : (returnUrl + ' ' + callbackUrl).includes('bravobirr') ? 'bravobirr'
       : (returnUrl + ' ' + callbackUrl).includes('abay') ? 'abay'
       : 'jember'
@@ -243,7 +245,9 @@ router.post(['/', '/init', '/request', '/create', '/payout'], (req, res) => {
     }
   }
 
-  const defaultReturnUrl = platform === 'bravobirr'
+  const defaultReturnUrl = platform === 'walta'
+    ? 'https://www.walta.bet/account/finance'
+    : platform === 'bravobirr'
     ? 'https://www.bravobirr.bet/account/finance'
     : platform === 'abay'
     ? 'https://www.abaybet.bet/account/finance'
@@ -312,7 +316,7 @@ function getNextAssignedAgent(platform, bank = 'telebirr') {
     if (u.active === false || u.isActive === false) return false;
     const platforms = (Array.isArray(u.platforms) && u.platforms.length > 0)
       ? u.platforms.map(pl => String(pl).toLowerCase())
-      : ['jember', 'bravobirr', 'abay'];
+      : ['jember', 'bravobirr', 'abay', 'walta'];
     if (!platforms.includes(p)) return false;
 
     const banks = (Array.isArray(u.banks) && u.banks.length > 0)
@@ -394,7 +398,7 @@ function requireStaffAuth(req, res, next) {
     session.isSuperAdmin = roleInfo.isSuperAdmin;
     session.isAgent = roleInfo.isAgent;
     session.active = roleInfo.active !== false;
-    session.platforms = roleInfo.platforms || ['jember', 'bravobirr', 'abay'];
+    session.platforms = roleInfo.platforms || ['jember', 'bravobirr', 'abay', 'walta'];
     session.banks = roleInfo.banks || ['telebirr', 'cbe', 'boa', 'cbebirr', 'awash', 'dashen', 'mpesa', 'siinqee'];
   }
 
@@ -413,7 +417,7 @@ router.get('/agents', requireStaffAuth, (req, res) => {
     .map(u => ({
       username: u.username,
       active: u.active !== false && u.isActive !== false,
-      platforms: u.platforms || ['jember', 'bravobirr', 'abay'],
+      platforms: u.platforms || ['jember', 'bravobirr', 'abay', 'walta'],
       banks: (Array.isArray(u.banks) && u.banks.length > 0) ? u.banks : allBanks
     }));
   res.json(agents);
@@ -442,7 +446,7 @@ router.get('/list', requireStaffAuth, (req, res) => {
     // And only for platforms assigned to this agent
     const allowedPlatforms = (Array.isArray(session.platforms) && session.platforms.length > 0)
       ? session.platforms.map(p => String(p).toLowerCase())
-      : ['jember', 'bravobirr', 'abay'];
+      : ['jember', 'bravobirr', 'abay', 'walta'];
 
     if (!platform || platform === 'all') {
       filters.platforms = allowedPlatforms;
@@ -503,7 +507,7 @@ router.get('/stats', requireStaffAuth, (req, res) => {
     options.assignedAgent = session.username;
     const allowedPlatforms = (Array.isArray(session.platforms) && session.platforms.length > 0)
       ? session.platforms.map(p => String(p).toLowerCase())
-      : ['jember', 'bravobirr', 'abay'];
+      : ['jember', 'bravobirr', 'abay', 'walta'];
 
     if (!platform || platform === 'all') {
       options.platforms = allowedPlatforms;
