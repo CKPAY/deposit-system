@@ -10,6 +10,8 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '15mb' }));
 app.use(express.urlencoded({ limit: '15mb', extended: true }));
+app.use('/screenshots', express.static(path.join(__dirname, 'data/screenshots')));
+app.use('/receipts', express.static(path.join(__dirname, 'data/receipts')));
 
 app.use('/api/deposit', depositRoutes);
 app.use('/api/withdraw', withdrawRoutes);
