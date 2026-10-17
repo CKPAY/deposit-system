@@ -346,10 +346,67 @@ router.put('/bank-accounts', requireAdminRole, (req, res) => {
 
   const fullData = readJSON('bank_accounts.json') || {};
   if (!fullData[p]) fullData[p] = {};
-  fullData[p][b] = accounts;
+  const existingAccs = fullData[p][b] || [];
+
+  // Merge to preserve connectedAgent, initialLimit, remainingLimit if not explicitly passed
+  const merged = accounts.map(a => {
+    const existing = existingAccs.find(e => e.id === a.id);
+    return {
+      ...existing,
+      ...a,
+      connectedAgent: (a.connectedAgent !== undefined) ? a.connectedAgent : (existing?.connectedAgent || null),
+      initialLimit: (a.initialLimit !== undefined) ? (a.initialLimit === null ? null : Number(a.initialLimit)) : (existing?.initialLimit ?? null),
+      remainingLimit: (a.remainingLimit !== undefined) ? (a.remainingLimit === null ? null : Number(a.remainingLimit)) : (existing?.remainingLimit ?? null),
+    };
+  });
+
+  fullData[p][b] = merged;
+  writeJSON('bank_accounts.json', fullData);
+  res.json({ success: true, platform: p, bank: b, accounts: merged });
+});
+
+router.post('/bank-account-connect', requireAdminRole, (req, res) => {
+  const platform = req.body.platform || 'jember';
+  const bank = req.body.bank || 'cbe';
+  const slotId = Number(req.body.slotId);
+  const { agent, limit, disconnect, remainingLimit } = req.body;
+  const p = normalizePlatform(platform);
+  const b = String(bank).toLowerCase();
+
+  const fullData = readJSON('bank_accounts.json') || {};
+  if (!fullData[p]) fullData[p] = {};
+  if (!Array.isArray(fullData[p][b])) {
+    return res.status(404).json({ error: 'Bank account slot not found' });
+  }
+
+  const slot = fullData[p][b].find(a => a.id === slotId);
+  if (!slot) {
+    return res.status(404).json({ error: 'Bank account slot not found' });
+  }
+
+  if (disconnect) {
+    slot.connectedAgent = null;
+    slot.initialLimit = null;
+    slot.remainingLimit = null;
+  } else {
+    if (agent !== undefined) {
+      slot.connectedAgent = agent ? String(agent).trim() : null;
+    }
+    if (limit !== undefined) {
+      const numLimit = Number(limit);
+      slot.initialLimit = isNaN(numLimit) ? 0 : numLimit;
+      if (remainingLimit === undefined) {
+        slot.remainingLimit = slot.initialLimit;
+      }
+    }
+    if (remainingLimit !== undefined) {
+      const numRemaining = Number(remainingLimit);
+      slot.remainingLimit = isNaN(numRemaining) ? 0 : numRemaining;
+    }
+  }
 
   writeJSON('bank_accounts.json', fullData);
-  res.json({ success: true, platform: p, bank: b, accounts });
+  res.json({ success: true, platform: p, bank: b, slot, accounts: fullData[p][b] });
 });
 
 router.get('/bank-status', (req, res) => {
