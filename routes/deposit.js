@@ -119,24 +119,31 @@ function normalizePhone(p) {
   return str;
 }
 
+function normalizePlatform(platform) {
+  if (!platform) return 'jember';
+  const p = String(platform).toLowerCase().trim();
+  if (p.includes('walta')) return 'walta';
+  if (p.includes('bravo')) return 'bravobirr';
+  if (p.includes('abay')) return 'abay';
+  if (p.includes('jember')) return 'jember';
+  return 'jember';
+}
+
 function detectPlatform(req, tokenPayload = {}) {
   const explicit = req.body?.platform || req.query?.platform || tokenPayload?.platform;
-  if (explicit && ['jember', 'bravobirr', 'abay', 'walta'].includes(String(explicit).toLowerCase())) {
-    return String(explicit).toLowerCase();
+  if (explicit) {
+    return normalizePlatform(explicit);
   }
   const returnUrl = req.body?.returnUrl || req.body?.return_url || tokenPayload?.returnUrl || tokenPayload?.return_url || '';
   const callbackUrl = req.body?.callbackUrl || req.body?.callback_url || tokenPayload?.callbackUrl || tokenPayload?.callback_url || '';
   const referer = req.headers?.['referer'] || req.headers?.['origin'] || '';
   const combined = `${returnUrl} ${callbackUrl} ${referer}`.toLowerCase();
 
-  if (combined.includes('walta')) return 'walta';
-  if (combined.includes('bravobirr')) return 'bravobirr';
-  if (combined.includes('abaybet') || combined.includes('abay.bet') || combined.includes('abay')) return 'abay';
-  return 'jember';
+  return normalizePlatform(combined);
 }
 
 function getPlatformSettings(platform = 'jember') {
-  const p = String(platform || 'jember').toLowerCase();
+  const p = normalizePlatform(platform);
   const raw = readJSON('settings.json') || {};
   if (raw.platforms && raw.platforms[p]) {
     return {
@@ -162,7 +169,7 @@ function getPlatformSettings(platform = 'jember') {
 }
 
 function getPlatformNumbers(platform = 'jember') {
-  const p = String(platform || 'jember').toLowerCase();
+  const p = normalizePlatform(platform);
   const raw = readJSON('numbers.json') || {};
   if (raw[p] && Array.isArray(raw[p].numbers)) {
     return raw[p].numbers;
@@ -225,7 +232,7 @@ function matchesMaskedPhone(creditedStr, activePhones) {
 }
 
 function getPlatformBankAccounts(platform = 'jember', bank = 'cbe') {
-  const p = String(platform || 'jember').toLowerCase();
+  const p = normalizePlatform(platform);
   const b = String(bank || 'cbe').toLowerCase();
   const raw = readJSON('bank_accounts.json') || {};
   if (raw[p] && Array.isArray(raw[p][b])) {
@@ -240,10 +247,17 @@ function getActiveBankAccounts(platform = 'jember', bank = 'cbe') {
 }
 
 function isBankEnabled(platform = 'jember', bank = 'cbe') {
-  const p = String(platform || 'jember').toLowerCase();
+  const p = normalizePlatform(platform);
   const b = String(bank || 'cbe').toLowerCase();
   const raw = readJSON('bank_accounts.json') || {};
-  if (raw[p] && raw[p].bankStatus && raw[p].bankStatus[b] === false) {
+  const platData = raw[p] || {};
+  const status = platData.bankStatus || {};
+  if (status[b] === false) {
+    return false;
+  }
+  const SUPPORTED_7_BANKS = ['cbe', 'boa', 'cbebirr', 'awash', 'dashen', 'mpesa', 'siinqee'];
+  const hasAnyExplicitTrue = SUPPORTED_7_BANKS.some(bk => status[bk] === true);
+  if (hasAnyExplicitTrue && status[b] !== true) {
     return false;
   }
   return true;
@@ -482,15 +496,38 @@ router.post('/reject', (req, res) => {
 
 router.get('/active-banks', (req, res) => {
   const platform = req.query.platform || detectPlatform(req) || 'jember';
-  const p = String(platform).toLowerCase();
+  const p = normalizePlatform(platform);
   const raw = readJSON('bank_accounts.json') || {};
   const platData = raw[p] || {};
   const status = platData.bankStatus || {};
 
   const SUPPORTED_7_BANKS = ['cbe', 'boa', 'cbebirr', 'awash', 'dashen', 'mpesa', 'siinqee'];
 
-  // Bank is enabled if status[b] !== false
-  const activeBanks = SUPPORTED_7_BANKS.filter(b => status[b] !== false);
+  const hasAnyExplicitTrue = SUPPORTED_7_BANKS.some(b => status[b] === true);
+  const hasAnyConfiguredAccounts = SUPPORTED_7_BANKS.some(b => {
+    const accs = Array.isArray(platData[b]) ? platData[b] : [];
+    return accs.some(a => a && a.active !== false && String(a.account || '').trim() !== '');
+  });
+
+  const activeBanks = SUPPORTED_7_BANKS.filter(b => {
+    // If explicitly disabled in admin bankStatus, exclude
+    if (status[b] === false) return false;
+
+    // If admin explicitly set some bank(s) to true, ONLY include banks where status[b] === true
+    if (hasAnyExplicitTrue) {
+      return status[b] === true;
+    }
+
+    // If admin has configured accounts for any banks, only include banks that have active accounts configured
+    if (hasAnyConfiguredAccounts) {
+      const accs = Array.isArray(platData[b]) ? platData[b] : [];
+      return accs.some(a => a && a.active !== false && String(a.account || '').trim() !== '');
+    }
+
+    // Default fallback: allow if not false
+    return true;
+  });
+
   const settings = getPlatformSettings(p);
 
   res.json({
