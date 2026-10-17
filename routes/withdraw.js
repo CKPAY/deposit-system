@@ -682,7 +682,8 @@ router.post('/approve', requireStaffAuth, (req, res) => {
     receiptImage: savedReceiptUrl
   });
 
-  // Credit to the agent's connected bank account limit (withdrawals replenish available deposit limit)
+  // For connected-agent accounts: withdrawals replenish the remaining float (so the agent can keep receiving deposits).
+  // For non-connected accounts with a limit: remaining does NOT increase (strict one-time quota).
   try {
     increaseBankWithdrawLimit(updated.platform, updated.bank, agentUsername, updated.amount, updated.accountNumber);
   } catch (err) {
