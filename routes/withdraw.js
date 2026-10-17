@@ -58,6 +58,20 @@ function normalizePhone(str) {
   return s;
 }
 
+function normalizeBank(raw) {
+  if (!raw) return '';
+  const s = String(raw).toLowerCase().trim();
+  if (s.includes('telebirr') || s.includes('tele birr') || s === 'tele') return 'telebirr';
+  if (s.includes('cbebirr') || s.includes('cbe birr') || s.includes('cbe-birr') || s.includes('cbe_birr')) return 'cbebirr';
+  if (s.includes('cbe') || s.includes('commercial') || s.includes('ንግድ ባንክ')) return 'cbe';
+  if (s.includes('boa') || s.includes('abyssinia') || s.includes('abisinia') || s.includes('አቢሲኒያ')) return 'boa';
+  if (s.includes('awash') || s.includes('አዋሽ')) return 'awash';
+  if (s.includes('dashen') || s.includes('ዳሸን')) return 'dashen';
+  if (s.includes('mpesa') || s.includes('m-pesa') || s.includes('safaricom')) return 'mpesa';
+  if (s.includes('siinqee') || s.includes('sinqee') || s.includes('ሲንቄ')) return 'siinqee';
+  return s;
+}
+
 // Webhook Payload Generator for Withdrawals
 function createWithdrawWebhookPayload(w, status, secret) {
   const timestamp = Date.now();
@@ -154,13 +168,14 @@ router.post(['/', '/init', '/request', '/create', '/payout'], (req, res) => {
   let detectedPlatform = null;
   const authHeader = req.headers['authorization'] || '';
   const bearerToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : null;
-  const rawToken = req.body.token || req.headers['x-ckpay-token'] || req.headers['x-api-key'] || bearerToken || req.query.token || null;
+  const rawToken = req.body.token || req.headers['x-ckpay-token'] || req.headers['x-api-key'] || req.headers['x-secret-key'] || bearerToken || req.query.token || null;
+  const directSecret = req.headers['x-secret-key'] || req.headers['x-api-key'] || req.body.secretKey || req.body.secret_key || req.body.apiKey || req.body.api_key || req.body.secret || req.query.secretKey || req.query.apiKey || null;
+
+  const raw = readJSON('settings.json') || {};
+  const configuredPlatforms = Object.keys(raw.platforms || {});
+  const allPlatforms = Array.from(new Set(['jember', 'bravobirr', 'abay', 'walta', ...configuredPlatforms]));
 
   if (rawToken) {
-    const raw = readJSON('settings.json') || {};
-    const configuredPlatforms = Object.keys(raw.platforms || {});
-    const allPlatforms = Array.from(new Set(['jember', 'bravobirr', 'abay', 'walta', ...configuredPlatforms]));
-
     for (const plat of allPlatforms) {
       try {
         const sec = getPlatformSecret(plat);
@@ -171,33 +186,51 @@ router.post(['/', '/init', '/request', '/create', '/payout'], (req, res) => {
     }
 
     if (!detectedPlatform) {
-      // Check if rawToken is actually the raw Secret Key directly
-      const raw = readJSON('settings.json') || {};
-      const configuredPlatforms = Object.keys(raw.platforms || {});
-      const allPlatforms = Array.from(new Set(['jember', 'bravobirr', 'abay', 'walta', ...configuredPlatforms]));
+      // Check if rawToken matches secret key or verifyApiKey directly
       for (const plat of allPlatforms) {
-        if (getPlatformSecret(plat) === String(rawToken).trim()) {
+        const sec = getPlatformSecret(plat);
+        const platConfig = (raw.platforms && raw.platforms[plat]) || {};
+        const vKey = platConfig.verifyApiKey || '';
+        const tokenTrimmed = String(rawToken).trim();
+        if ((sec && tokenTrimmed === sec) || (vKey && tokenTrimmed === vKey.trim())) {
           detectedPlatform = plat;
           break;
         }
       }
-      if (!detectedPlatform) {
-        try { tokenPayload = jwt.decode(rawToken) || {}; } catch {}
+    }
+
+    if (!detectedPlatform && directSecret) {
+      for (const plat of allPlatforms) {
+        const sec = getPlatformSecret(plat);
+        const platConfig = (raw.platforms && raw.platforms[plat]) || {};
+        const vKey = platConfig.verifyApiKey || '';
+        const secTrimmed = String(directSecret).trim();
+        if ((sec && secTrimmed === sec) || (vKey && secTrimmed === vKey.trim())) {
+          detectedPlatform = plat;
+          break;
+        }
+      }
+    }
+
+    if (!detectedPlatform) {
+      try { tokenPayload = jwt.decode(rawToken) || {}; } catch {}
+      if (!tokenPayload || Object.keys(tokenPayload).length === 0) {
         return res.status(401).json({ error: 'Invalid or expired withdrawal token / secret key.' });
       }
     }
-  }
-
-  const directSecret = req.headers['x-secret-key'] || req.body.secretKey || req.body.apiKey || req.body.secret || null;
-  if (directSecret && !detectedPlatform) {
-    const raw = readJSON('settings.json') || {};
-    const configuredPlatforms = Object.keys(raw.platforms || {});
-    const allPlatforms = Array.from(new Set(['jember', 'bravobirr', 'abay', 'walta', ...configuredPlatforms]));
+  } else if (directSecret) {
     for (const plat of allPlatforms) {
-      if (getPlatformSecret(plat) === String(directSecret).trim()) {
+      const sec = getPlatformSecret(plat);
+      const platConfig = (raw.platforms && raw.platforms[plat]) || {};
+      const vKey = platConfig.verifyApiKey || '';
+      const secTrimmed = String(directSecret).trim();
+      if ((sec && secTrimmed === sec) || (vKey && secTrimmed === vKey.trim())) {
         detectedPlatform = plat;
         break;
       }
+    }
+    if (!detectedPlatform) {
+      return res.status(401).json({ error: 'Invalid withdrawal secret key / API key.' });
     }
   }
 
@@ -207,16 +240,54 @@ router.post(['/', '/init', '/request', '/create', '/payout'], (req, res) => {
 
   const platform = detectedPlatform || normalizePlatform(explicitPlat || (returnUrl + ' ' + callbackUrl));
 
-  const userId = req.body.userId || req.body.user_id || req.body.id || req.body.account_id || req.body.client_id || tokenPayload.userId || tokenPayload.user_id || tokenPayload.id || tokenPayload.account_id || null;
-  const rawAmount = req.body.amount !== undefined ? req.body.amount : tokenPayload.amount;
-  const amount = parseFloat(rawAmount);
-  const orderId = req.body.orderId || req.body.order_id || req.body.merchant_order_id || tokenPayload.order_id || tokenPayload.orderId || null;
-  const rawPhone = req.body.phoneNumber || req.body.phone || req.body.mobile || req.body.msisdn || tokenPayload.phoneNumber || tokenPayload.phone || tokenPayload.mobile || tokenPayload.msisdn || null;
+  // Exhaustive parameter parsing for all betting platform conventions
+  const userId = req.body.userId || req.body.user_id || req.body.id || req.body.account_id || req.body.accountId ||
+                 req.body.client_id || req.body.clientId || req.body.player_id || req.body.playerId ||
+                 req.body.member_id || req.body.memberId || req.body.customer_id || req.body.customerId ||
+                 req.body.username || req.body.user ||
+                 tokenPayload.userId || tokenPayload.user_id || tokenPayload.id || tokenPayload.account_id || tokenPayload.accountId ||
+                 tokenPayload.client_id || tokenPayload.clientId || tokenPayload.player_id || tokenPayload.playerId || tokenPayload.member_id || tokenPayload.username ||
+                 req.query.userId || req.query.user_id || req.query.id;
 
-  const explicitBank = req.body.bank || tokenPayload.bank || 'telebirr';
-  const bank = String(explicitBank).toLowerCase();
-  const rawAccount = req.body.accountNumber || req.body.account || tokenPayload.accountNumber || tokenPayload.account || null;
-  const accountHolder = req.body.accountHolderName || req.body.accountHolder || tokenPayload.accountHolderName || tokenPayload.accountHolder || null;
+  const rawAmount = req.body.amount !== undefined ? req.body.amount :
+                    (req.body.withdraw_amount !== undefined ? req.body.withdraw_amount :
+                    (req.body.withdrawAmount !== undefined ? req.body.withdrawAmount :
+                    (req.body.payout_amount !== undefined ? req.body.payout_amount :
+                    (req.body.value !== undefined ? req.body.value :
+                    (tokenPayload.amount !== undefined ? tokenPayload.amount : req.query.amount)))));
+  const amount = parseFloat(rawAmount);
+
+  const orderId = req.body.orderId || req.body.order_id || req.body.merchant_order_id || req.body.merchantOrderId ||
+                  req.body.txId || req.body.tx_id || req.body.transactionId || req.body.transaction_id ||
+                  tokenPayload.order_id || tokenPayload.orderId || tokenPayload.merchant_order_id ||
+                  req.query.orderId || req.query.order_id || null;
+
+  const rawPhone = req.body.phoneNumber || req.body.phone_number || req.body.phone || req.body.mobile || req.body.msisdn ||
+                   tokenPayload.phoneNumber || tokenPayload.phone_number || tokenPayload.phone || tokenPayload.mobile || tokenPayload.msisdn ||
+                   req.query.phoneNumber || req.query.phone || null;
+
+  const rawAccount = req.body.accountNumber || req.body.account_number || req.body.account || req.body.accountNo || req.body.account_no ||
+                     req.body.bankAccount || req.body.bank_account || req.body.bankAccountNumber || req.body.bank_account_number ||
+                     req.body.destination_account || req.body.destinationAccount || req.body.receiver_account || req.body.receiverAccount ||
+                     req.body.target_account || req.body.targetAccount || req.body.recipient_account || req.body.recipientAccount ||
+                     req.body.wallet_id || req.body.walletId || req.body.iban ||
+                     tokenPayload.accountNumber || tokenPayload.account_number || tokenPayload.account || tokenPayload.accountNo || tokenPayload.account_no ||
+                     tokenPayload.bankAccount || tokenPayload.bank_account || tokenPayload.destination_account || tokenPayload.wallet_id ||
+                     req.query.accountNumber || req.query.account_number || req.query.account;
+
+  const rawBankCandidate = req.body.bank || req.body.bankName || req.body.bank_name || req.body.bankCode || req.body.bank_code ||
+                           req.body.paymentMethod || req.body.payment_method || req.body.payment_channel || req.body.paymentChannel ||
+                           req.body.provider || req.body.method || req.body.channel ||
+                           tokenPayload.bank || tokenPayload.bankName || tokenPayload.bank_name || tokenPayload.bankCode || tokenPayload.bank_code ||
+                           tokenPayload.paymentMethod || tokenPayload.payment_method || tokenPayload.provider || tokenPayload.method ||
+                           req.query.bank || req.query.bank_name || req.query.bankName;
+
+  // Account holder / beneficiary name is NEVER required
+  const accountHolder = req.body.accountHolderName || req.body.account_holder_name || req.body.accountHolder || req.body.account_holder ||
+                        req.body.holderName || req.body.holder_name || req.body.beneficiaryName || req.body.beneficiary_name ||
+                        req.body.beneficiary || req.body.customerName || req.body.customer_name || req.body.fullName || req.body.full_name || req.body.name ||
+                        tokenPayload.accountHolderName || tokenPayload.account_holder_name || tokenPayload.accountHolder || tokenPayload.beneficiaryName ||
+                        tokenPayload.fullName || tokenPayload.name || null;
 
   if (!userId || !amount || isNaN(amount) || amount <= 0) {
     return res.status(400).json({ error: 'Invalid withdrawal parameters (missing userId or amount)' });
@@ -224,6 +295,18 @@ router.post(['/', '/init', '/request', '/create', '/payout'], (req, res) => {
 
   const phone = normalizePhone(rawPhone || rawAccount);
   let accountNum = (rawAccount ? String(rawAccount).trim() : '') || (rawPhone ? String(rawPhone).trim() : '');
+
+  // Normalize bank name
+  let bank = normalizeBank(rawBankCandidate);
+  if (!bank) {
+    if (phone && /^0[97]\d{8}$/.test(phone)) {
+      bank = 'telebirr';
+    } else if (accountNum.startsWith('1000') || accountNum.length >= 10) {
+      bank = 'cbe';
+    } else {
+      bank = 'cbe';
+    }
+  }
 
   if (bank === 'telebirr' || bank === 'cbebirr' || bank === 'mpesa') {
     if (!phone || !/^0[97]\d{8}$/.test(phone)) {
