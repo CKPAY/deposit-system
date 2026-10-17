@@ -11,8 +11,11 @@ const {
   getWithdrawalByOrderId,
   updateWithdrawalStatus,
   getAllWithdrawals,
-  getWithdrawalStats
+  getWithdrawalStats,
+  getAllTxs,
+  db
 } = require('../db');
+const { increaseBankWithdrawLimit, getAgentConnectedAccounts } = require('../bankLimits');
 
 const dataDir = path.join(__dirname, '../data');
 
@@ -679,6 +682,13 @@ router.post('/approve', requireStaffAuth, (req, res) => {
     receiptImage: savedReceiptUrl
   });
 
+  // Credit to the agent's connected bank account limit (withdrawals replenish available deposit limit)
+  try {
+    increaseBankWithdrawLimit(updated.platform, updated.bank, agentUsername, updated.amount, updated.accountNumber);
+  } catch (err) {
+    console.error('[Bank Limit] Error increasing withdraw limit:', err.message);
+  }
+
   if (updated.callbackUrl) {
     const secret = getPlatformSecret(updated.platform);
     const payload = createWithdrawWebhookPayload(updated, 'completed', secret);
@@ -690,6 +700,104 @@ router.post('/approve', requireStaffAuth, (req, res) => {
     message: `Withdrawal approved by ${agentUsername}`,
     withdrawal: updated
   });
+});
+
+// Get bank accounts connected to the logged-in agent
+router.get('/agent-accounts', requireStaffAuth, (req, res) => {
+  const session = req.adminSession;
+  const username = session?.username;
+  if (!username) return res.json([]);
+  const accounts = getAgentConnectedAccounts(username);
+  res.json(accounts);
+});
+
+// Get deposits for the logged-in agent (processed on their connected bank accounts)
+router.get('/agent-deposits', requireStaffAuth, (req, res) => {
+  const session = req.adminSession;
+  const username = session?.username;
+  const { platform, status, search, bank } = req.query;
+
+  const connected = getAgentConnectedAccounts(username);
+  const accountNumbers = connected.map(a => a.account).filter(Boolean);
+
+  const filters = {
+    platform: platform && platform !== 'all' ? platform : undefined,
+    status: status && status !== 'all' ? status : undefined,
+    search: search || undefined,
+    bank: bank && bank !== 'all' ? bank : undefined,
+    assignedAgent: username,
+    accountNumbers: accountNumbers
+  };
+
+  const rows = getAllTxs(filters);
+  res.json(rows);
+});
+
+// Get deposit stats for the logged-in agent (specifically for their connected bank accounts only!)
+router.get('/agent-deposit-stats', requireStaffAuth, (req, res) => {
+  const session = req.adminSession;
+  const username = session?.username;
+  if (!username) return res.status(401).json({ error: 'Unauthorized' });
+
+  const connected = getAgentConnectedAccounts(username);
+  const accountNumbers = connected.map(a => a.account).filter(Boolean);
+
+  if (accountNumbers.length === 0) {
+    return res.json({
+      connectedAccounts: [],
+      todayETB: 0, todayCount: 0,
+      weekETB: 0, weekCount: 0,
+      monthETB: 0, monthCount: 0,
+      totalVerifiedETB: 0, totalVerifiedCount: 0,
+      pendingCount: 0, processingCount: 0
+    });
+  }
+
+  const timestamps = getEthiopianTimeMidnightTimestamps();
+  const placeholders = accountNumbers.map(() => '?').join(',');
+  const sql = `
+    SELECT
+      COUNT(CASE WHEN status = 'verified' THEN 1 END) as totalVerifiedCount,
+      SUM(CASE WHEN status = 'verified' THEN COALESCE(verifiedAmount, amount, 0) ELSE 0 END) as totalVerifiedETB,
+      COUNT(CASE WHEN status = 'verified' AND createdAt >= ? THEN 1 END) as todayCount,
+      SUM(CASE WHEN status = 'verified' AND createdAt >= ? THEN COALESCE(verifiedAmount, amount, 0) ELSE 0 END) as todayETB,
+      COUNT(CASE WHEN status = 'verified' AND createdAt >= ? THEN 1 END) as weekCount,
+      SUM(CASE WHEN status = 'verified' AND createdAt >= ? THEN COALESCE(verifiedAmount, amount, 0) ELSE 0 END) as weekETB,
+      COUNT(CASE WHEN status = 'verified' AND createdAt >= ? THEN 1 END) as monthCount,
+      SUM(CASE WHEN status = 'verified' AND createdAt >= ? THEN COALESCE(verifiedAmount, amount, 0) ELSE 0 END) as monthETB,
+      COUNT(CASE WHEN status = 'pending' THEN 1 END) as pendingCount,
+      COUNT(CASE WHEN status = 'processing' THEN 1 END) as processingCount
+    FROM transactions
+    WHERE (assignedAgent = ? OR accountNumber IN (${placeholders}))
+  `;
+
+  const params = [
+    timestamps.todayStart, timestamps.todayStart,
+    timestamps.weekStart, timestamps.weekStart,
+    timestamps.monthStart, timestamps.monthStart,
+    username,
+    ...accountNumbers
+  ];
+
+  try {
+    const row = db.prepare(sql).get(...params) || {};
+    res.json({
+      connectedAccounts: connected,
+      todayETB: row.todayETB || 0,
+      todayCount: row.todayCount || 0,
+      weekETB: row.weekETB || 0,
+      weekCount: row.weekCount || 0,
+      monthETB: row.monthETB || 0,
+      monthCount: row.monthCount || 0,
+      totalVerifiedETB: row.totalVerifiedETB || 0,
+      totalVerifiedCount: row.totalVerifiedCount || 0,
+      pendingCount: row.pendingCount || 0,
+      processingCount: row.processingCount || 0
+    });
+  } catch (err) {
+    console.error('Error fetching agent deposit stats:', err.message);
+    res.status(500).json({ error: 'Failed to compute deposit stats' });
+  }
 });
 
 // Serve receipt image for preview in admin/agent terminal
