@@ -5,6 +5,7 @@ const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
+const { deductBankDepositLimit } = require('../bankLimits');
 
 // Secret Keys per betting platform
 function getPlatformSecret(platform = 'jember') {
@@ -589,6 +590,7 @@ router.post('/init', (req, res) => {
 
   let assignedPhone = '';
   let assignedAccount = '';
+  let assignedAgent = null;
 
   if (bank === 'telebirr') {
     const numbers = getPlatformNumbers(platform);
@@ -642,8 +644,25 @@ router.post('/init', (req, res) => {
     if (activeBankList.length === 0) {
       return res.status(500).json({ error: `No active ${bank.toUpperCase()} accounts configured for ${settings.siteName}` });
     }
-    const randomIdx = Math.floor(Math.random() * activeBankList.length);
-    assignedAccount = activeBankList[randomIdx].account.trim();
+
+    // Smart Rotation: Skip accounts where remainingLimit < requested amount
+    const candidateAccounts = activeBankList.filter(a => {
+      if (!a.connectedAgent || a.remainingLimit === undefined || a.remainingLimit === null) {
+        return true; // Not limited by agent float
+      }
+      return Number(a.remainingLimit) >= amt; // Has enough remaining limit
+    });
+
+    if (candidateAccounts.length === 0) {
+      return res.status(400).json({
+        error: `Deposit limit reached for ${bank.toUpperCase()} accounts (Requested ${amt} ETB exceeds available limit). Please try a smaller amount or choose another bank.`
+      });
+    }
+
+    const randomIdx = Math.floor(Math.random() * candidateAccounts.length);
+    const chosenSlot = candidateAccounts[randomIdx];
+    assignedAccount = chosenSlot.account.trim();
+    assignedAgent = chosenSlot.connectedAgent || null;
   }
 
   // Re-use active pending session ONLY for browser reloads (no token, same amount & orderId)
@@ -689,6 +708,7 @@ router.post('/init', (req, res) => {
     amount: amt,
     phoneNumber: bank === 'telebirr' ? assignedPhone : assignedAccount,
     accountNumber: bank === 'telebirr' ? null : assignedAccount,
+    assignedAgent: bank === 'telebirr' ? null : assignedAgent,
     status: 'pending',
     createdAt: now,
     expiresAt,
@@ -1211,6 +1231,11 @@ router.post('/verify', (req, res) => {
             receipt: result.receipt
           });
 
+          // Deduct from connected bank account float limit
+          if (updatedTx && updatedTx.bank !== 'telebirr') {
+            deductBankDepositLimit(updatedTx.platform, updatedTx.bank, updatedTx.accountNumber, parsedAmt);
+          }
+
           // Webhook Callback with HMAC-SHA256 Signature Verification & Retries
           if (updatedTx && updatedTx.callbackUrl) {
             const payload = createWebhookPayload(updatedTx, 'verified', parsedAmt, result.receipt);
@@ -1381,6 +1406,11 @@ router.post('/verify-screenshot', async (req, res) => {
             receipt: result.receipt,
             receiptImage: savedImageUrl
           });
+
+          // Deduct from connected bank account float limit
+          if (updatedTx && updatedTx.bank !== 'telebirr') {
+            deductBankDepositLimit(updatedTx.platform, updatedTx.bank, updatedTx.accountNumber, parsedAmt);
+          }
 
           // Webhook Callback with HMAC-SHA256 Signature Verification & Retries
           if (updatedTx && updatedTx.callbackUrl) {
