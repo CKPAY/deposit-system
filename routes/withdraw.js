@@ -26,9 +26,19 @@ function readJSON(file) {
   }
 }
 
+function normalizePlatform(platform) {
+  if (!platform) return 'jember';
+  const p = String(platform).toLowerCase().trim();
+  if (p.includes('walta')) return 'walta';
+  if (p.includes('bravo')) return 'bravobirr';
+  if (p.includes('abay')) return 'abay';
+  if (p.includes('jember')) return 'jember';
+  return 'jember';
+}
+
 // Platform Secret Keys for JWT decoding and Webhook HMAC-SHA256 signing
 function getPlatformSecret(platform = 'jember') {
-  const p = String(platform || 'jember').toLowerCase();
+  const p = normalizePlatform(platform);
   const raw = readJSON('settings.json') || {};
   if (raw.platforms && raw.platforms[p] && raw.platforms[p].jwtSecret) {
     return raw.platforms[p].jwtSecret;
@@ -195,14 +205,7 @@ router.post(['/', '/init', '/request', '/create', '/payout'], (req, res) => {
   const returnUrl = req.body.returnUrl || req.body.return_url || tokenPayload.returnUrl || tokenPayload.return_url || '';
   const callbackUrl = req.body.callbackUrl || req.body.callback_url || tokenPayload.callbackUrl || tokenPayload.callback_url || '';
 
-  const platform = detectedPlatform || (
-    explicitPlat && ['jember', 'bravobirr', 'abay', 'walta'].includes(String(explicitPlat).toLowerCase())
-      ? String(explicitPlat).toLowerCase()
-      : (returnUrl + ' ' + callbackUrl).includes('walta') ? 'walta'
-      : (returnUrl + ' ' + callbackUrl).includes('bravobirr') ? 'bravobirr'
-      : (returnUrl + ' ' + callbackUrl).includes('abay') ? 'abay'
-      : 'jember'
-  );
+  const platform = detectedPlatform || normalizePlatform(explicitPlat || (returnUrl + ' ' + callbackUrl));
 
   const userId = req.body.userId || req.body.user_id || req.body.id || req.body.account_id || req.body.client_id || tokenPayload.userId || tokenPayload.user_id || tokenPayload.id || tokenPayload.account_id || null;
   const rawAmount = req.body.amount !== undefined ? req.body.amount : tokenPayload.amount;
