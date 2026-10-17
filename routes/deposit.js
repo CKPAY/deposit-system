@@ -516,13 +516,23 @@ router.get('/active-banks', (req, res) => {
 
     // If admin explicitly set some bank(s) to true, ONLY include banks where status[b] === true
     if (hasAnyExplicitTrue) {
-      return status[b] === true;
+      if (status[b] !== true) return false;
     }
 
-    // If admin has configured accounts for any banks, only include banks that have active accounts configured
+    // If admin has configured accounts for any banks, only include banks that have at least one available account:
+    // - Accounts with NO limit set: always available.
+    // - Accounts WITH a limit (connected or not): available only while remaining > 0.
     if (hasAnyConfiguredAccounts) {
       const accs = Array.isArray(platData[b]) ? platData[b] : [];
-      return accs.some(a => a && a.active !== false && String(a.account || '').trim() !== '');
+      const hasAvailable = accs.some(a => {
+        if (!a || a.active === false || String(a.account || '').trim() === '') return false;
+        const hasLimit = (a.remainingLimit !== undefined && a.remainingLimit !== null) ||
+                         (a.initialLimit !== undefined && a.initialLimit !== null);
+        if (!hasLimit) return true; // No limit set -> always available
+        const rem = Number(a.remainingLimit !== undefined && a.remainingLimit !== null ? a.remainingLimit : (a.initialLimit || 0));
+        return rem > 0; // Has a limit -> only available while remaining > 0
+      });
+      return hasAvailable;
     }
 
     // Default fallback: allow if not false
@@ -645,12 +655,19 @@ router.post('/init', (req, res) => {
       return res.status(500).json({ error: `No active ${bank.toUpperCase()} accounts configured for ${settings.siteName}` });
     }
 
-    // Smart Rotation: Skip accounts where remainingLimit < requested amount
+    // Candidate Accounts:
+    // 1. Non-connected accounts with NO limit set (remainingLimit null, initialLimit null) -> Available always.
+    // 2. Any account (connected OR non-connected) WITH a set limit follows strict quota:
+    //    - Works only while remaining >= requested amount.
+    //    - STOPS being available once the limit is finished (remaining < amt).
     const candidateAccounts = activeBankList.filter(a => {
-      if (!a.connectedAgent || a.remainingLimit === undefined || a.remainingLimit === null) {
-        return true; // Not limited by agent float
+      const hasLimit = (a.remainingLimit !== undefined && a.remainingLimit !== null) ||
+                       (a.initialLimit !== undefined && a.initialLimit !== null);
+      if (!hasLimit) {
+        return true; // No limit set -> always available
       }
-      return Number(a.remainingLimit) >= amt; // Has enough remaining limit
+      const remaining = Number(a.remainingLimit !== undefined && a.remainingLimit !== null ? a.remainingLimit : (a.initialLimit || 0));
+      return remaining >= amt; // Has a limit -> stop when it runs out
     });
 
     if (candidateAccounts.length === 0) {
