@@ -15,7 +15,7 @@ const {
   getAllTxs,
   db
 } = require('../db');
-const { increaseBankWithdrawLimit, getAgentConnectedAccounts } = require('../bankLimits');
+const { increaseBankWithdrawLimit, getAgentConnectedAccounts, getAllConnectedAccounts } = require('../bankLimits');
 
 const dataDir = path.join(__dirname, '../data');
 
@@ -703,22 +703,35 @@ router.post('/approve', requireStaffAuth, (req, res) => {
   });
 });
 
-// Get bank accounts connected to the logged-in agent
+// Get bank accounts connected to the logged-in agent (or requested agent for admins)
 router.get('/agent-accounts', requireStaffAuth, (req, res) => {
   const session = req.adminSession;
+  const isFullAdmin = session?.isSuperAdmin || session?.role === 'superadmin' || session?.role === 'admin';
+  const targetAgent = req.query.agent;
+
+  if (isFullAdmin) {
+    if (targetAgent && targetAgent !== 'all') {
+      return res.json(getAgentConnectedAccounts(targetAgent));
+    }
+    return res.json(getAllConnectedAccounts());
+  }
+
   const username = session?.username;
   if (!username) return res.json([]);
-  const accounts = getAgentConnectedAccounts(username);
-  res.json(accounts);
+  return res.json(getAgentConnectedAccounts(username));
 });
 
 // Get deposits for the logged-in agent (processed on their connected bank accounts)
 router.get('/agent-deposits', requireStaffAuth, (req, res) => {
   const session = req.adminSession;
-  const username = session?.username;
+  const isFullAdmin = session?.isSuperAdmin || session?.role === 'superadmin' || session?.role === 'admin';
+  const targetAgent = req.query.agent;
+  const username = (isFullAdmin && targetAgent && targetAgent !== 'all') ? targetAgent : session?.username;
   const { platform, status, search, bank } = req.query;
 
-  const connected = getAgentConnectedAccounts(username);
+  const connected = (isFullAdmin && (!targetAgent || targetAgent === 'all'))
+    ? getAllConnectedAccounts()
+    : getAgentConnectedAccounts(username);
   const accountNumbers = connected.map(a => a.account).filter(Boolean);
 
   const filters = {
@@ -726,7 +739,7 @@ router.get('/agent-deposits', requireStaffAuth, (req, res) => {
     status: status && status !== 'all' ? status : undefined,
     search: search || undefined,
     bank: bank && bank !== 'all' ? bank : undefined,
-    assignedAgent: username,
+    assignedAgent: (isFullAdmin && (!targetAgent || targetAgent === 'all')) ? undefined : username,
     accountNumbers: accountNumbers
   };
 
@@ -737,10 +750,27 @@ router.get('/agent-deposits', requireStaffAuth, (req, res) => {
 // Get deposit stats for the logged-in agent (specifically for their connected bank accounts only!)
 router.get('/agent-deposit-stats', requireStaffAuth, (req, res) => {
   const session = req.adminSession;
-  const username = session?.username;
-  if (!username) return res.status(401).json({ error: 'Unauthorized' });
+  if (!session) return res.status(401).json({ error: 'Unauthorized' });
 
-  const connected = getAgentConnectedAccounts(username);
+  const isFullAdmin = session.isSuperAdmin || session.role === 'superadmin' || session.role === 'admin';
+  const targetAgent = req.query.agent;
+
+  let connected = [];
+  let usernameForQuery = null;
+
+  if (isFullAdmin) {
+    if (targetAgent && targetAgent !== 'all') {
+      connected = getAgentConnectedAccounts(targetAgent);
+      usernameForQuery = targetAgent;
+    } else {
+      connected = getAllConnectedAccounts();
+      usernameForQuery = null;
+    }
+  } else {
+    usernameForQuery = session.username;
+    connected = getAgentConnectedAccounts(usernameForQuery);
+  }
+
   const accountNumbers = connected.map(a => a.account).filter(Boolean);
 
   if (accountNumbers.length === 0) {
@@ -756,6 +786,22 @@ router.get('/agent-deposit-stats', requireStaffAuth, (req, res) => {
 
   const timestamps = getEthiopianTimeMidnightTimestamps();
   const placeholders = accountNumbers.map(() => '?').join(',');
+
+  let whereClause = '';
+  let params = [
+    timestamps.todayStart, timestamps.todayStart,
+    timestamps.weekStart, timestamps.weekStart,
+    timestamps.monthStart, timestamps.monthStart
+  ];
+
+  if (usernameForQuery) {
+    whereClause = `(assignedAgent = ? OR accountNumber IN (${placeholders}))`;
+    params.push(usernameForQuery, ...accountNumbers);
+  } else {
+    whereClause = `(accountNumber IN (${placeholders}))`;
+    params.push(...accountNumbers);
+  }
+
   const sql = `
     SELECT
       COUNT(CASE WHEN status = 'verified' THEN 1 END) as totalVerifiedCount,
@@ -769,16 +815,8 @@ router.get('/agent-deposit-stats', requireStaffAuth, (req, res) => {
       COUNT(CASE WHEN status = 'pending' THEN 1 END) as pendingCount,
       COUNT(CASE WHEN status = 'processing' THEN 1 END) as processingCount
     FROM transactions
-    WHERE (assignedAgent = ? OR accountNumber IN (${placeholders}))
+    WHERE ${whereClause}
   `;
-
-  const params = [
-    timestamps.todayStart, timestamps.todayStart,
-    timestamps.weekStart, timestamps.weekStart,
-    timestamps.monthStart, timestamps.monthStart,
-    username,
-    ...accountNumbers
-  ];
 
   try {
     const row = db.prepare(sql).get(...params) || {};
