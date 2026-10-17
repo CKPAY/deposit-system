@@ -165,10 +165,42 @@ function getAgentConnectedAccounts(agentUsername) {
   return connected;
 }
 
+/**
+ * Get all connected bank accounts across all agents, platforms, and banks.
+ */
+function getAllConnectedAccounts() {
+  const fullData = readJSON('bank_accounts.json') || {};
+  const connected = [];
+
+  for (const [plat, bankMap] of Object.entries(fullData)) {
+    if (typeof bankMap !== 'object' || !bankMap) continue;
+    for (const [bank, accs] of Object.entries(bankMap)) {
+      if (!Array.isArray(accs)) continue;
+      accs.forEach(acc => {
+        if (acc && acc.connectedAgent) {
+          connected.push({
+            platform: plat,
+            bank: bank,
+            id: acc.id,
+            account: acc.account,
+            label: acc.label,
+            active: acc.active !== false,
+            connectedAgent: acc.connectedAgent,
+            initialLimit: Number(acc.initialLimit) || 0,
+            remainingLimit: (acc.remainingLimit !== undefined && acc.remainingLimit !== null) ? Number(acc.remainingLimit) : Number(acc.initialLimit) || 0
+          });
+        }
+      });
+    }
+  }
+  return connected;
+}
+
 module.exports = {
   deductBankDepositLimit,
   increaseBankWithdrawLimit,
   getAgentConnectedAccounts,
+  getAllConnectedAccounts,
   readJSON,
   writeJSON,
   normalizePlatform
