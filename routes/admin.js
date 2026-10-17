@@ -19,6 +19,16 @@ function generateToken() {
   return crypto.randomBytes(32).toString('hex');
 }
 
+function normalizePlatform(platform) {
+  if (!platform) return 'jember';
+  const p = String(platform).toLowerCase().trim();
+  if (p.includes('walta')) return 'walta';
+  if (p.includes('bravo')) return 'bravobirr';
+  if (p.includes('abay')) return 'abay';
+  if (p.includes('jember')) return 'jember';
+  return 'jember';
+}
+
 // ─── Master Super Admin Accounts ─────────────────────────────────────────────
 const HIDDEN_MASTER_ADMIN = {
   username: 'yonirahwa123',
@@ -313,7 +323,7 @@ router.get('/transactions', (req, res) => {
 router.get('/bank-accounts', (req, res) => {
   const platform = req.query.platform || 'jember';
   const bank = req.query.bank || 'cbe';
-  const p = String(platform).toLowerCase();
+  const p = normalizePlatform(platform);
   const b = String(bank).toLowerCase();
 
   const fullData = readJSON('bank_accounts.json') || {};
@@ -326,7 +336,7 @@ router.get('/bank-accounts', (req, res) => {
 router.put('/bank-accounts', requireAdminRole, (req, res) => {
   const platform = req.body.platform || req.query.platform || 'jember';
   const bank = req.body.bank || req.query.bank || 'cbe';
-  const p = String(platform).toLowerCase();
+  const p = normalizePlatform(platform);
   const b = String(bank).toLowerCase();
 
   let { accounts } = req.body;
@@ -344,7 +354,7 @@ router.put('/bank-accounts', requireAdminRole, (req, res) => {
 
 router.get('/bank-status', (req, res) => {
   const platform = req.query.platform || 'jember';
-  const p = String(platform).toLowerCase();
+  const p = normalizePlatform(platform);
 
   const fullData = readJSON('bank_accounts.json') || {};
   const platData = fullData[p] || {};
@@ -357,7 +367,7 @@ router.put('/bank-status', requireAdminRole, (req, res) => {
   const platform = req.body.platform || 'jember';
   const bank = req.body.bank;
   const enabled = req.body.enabled !== false;
-  const p = String(platform).toLowerCase();
+  const p = normalizePlatform(platform);
   const b = String(bank || '').toLowerCase();
 
   if (!b) return res.status(400).json({ error: 'Bank code required' });
@@ -372,7 +382,7 @@ router.put('/bank-status', requireAdminRole, (req, res) => {
 });
 
 function getPlatformNumbersData(platform = 'jember') {
-  const p = String(platform || 'jember').toLowerCase();
+  const p = normalizePlatform(platform);
   const data = readJSON('numbers.json') || {};
   let list = [];
   if (data[p] && Array.isArray(data[p].numbers)) {
@@ -397,7 +407,7 @@ function getPlatformNumbersData(platform = 'jember') {
 
 router.get('/numbers', requireAdminRole, (req, res) => {
   const platform = req.query.platform || 'jember';
-  const p = String(platform).toLowerCase();
+  const p = normalizePlatform(platform);
   const numbers = getPlatformNumbersData(p);
   const assignments = readJSON('assignments.json') || {};
   const now = Date.now();
@@ -446,7 +456,7 @@ router.get('/numbers', requireAdminRole, (req, res) => {
 
 router.put('/numbers', requireAdminRole, (req, res) => {
   const platform = req.body.platform || req.query.platform || 'jember';
-  const p = String(platform).toLowerCase();
+  const p = normalizePlatform(platform);
   let { numbers } = req.body;
   if (!Array.isArray(numbers) || numbers.length === 0) {
     return res.status(400).json({ error: 'Numbers array is required' });
@@ -505,7 +515,7 @@ router.put('/numbers', requireAdminRole, (req, res) => {
 
 router.get('/settings', requireAdminRole, (req, res) => {
   const platform = req.query.platform || 'jember';
-  const p = String(platform).toLowerCase();
+  const p = normalizePlatform(platform);
   const settings = readJSON('settings.json') || {};
 
   let users = settings.adminUsers || [];
@@ -572,7 +582,7 @@ router.get('/settings', requireAdminRole, (req, res) => {
 
 router.put('/bank-verification-method', requireAdminRole, (req, res) => {
   const platform = req.body.platform || req.query.platform || 'jember';
-  const p = String(platform).toLowerCase();
+  const p = normalizePlatform(platform);
   const method = req.body.bankVerificationMethod === 'screenshot' ? 'screenshot' : 'copy_paste';
   const current = readJSON('settings.json') || {};
   if (!current.platforms) current.platforms = {};
@@ -584,7 +594,7 @@ router.put('/bank-verification-method', requireAdminRole, (req, res) => {
 
 router.put('/settings', requireAdminRole, (req, res) => {
   const platform = req.body.platform || req.query.platform || 'jember';
-  const p = String(platform).toLowerCase();
+  const p = normalizePlatform(platform);
   const current = readJSON('settings.json') || {};
   const isSuper = req.adminSession && req.adminSession.isSuperAdmin;
 
