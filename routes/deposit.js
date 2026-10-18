@@ -293,8 +293,12 @@ function extractTransactionId(text) {
 
   // 1. Direct single token (if user pasted only the code or only the URL)
   if (!/\s/.test(str)) {
-    // If it is a CBE / Bank receipt URL pasted directly
-    const directUrlMatch = str.match(/https?:\/\/(?:[a-zA-Z0-9-]+\.)*(?:cbe\.com\.et|telebirr\.et|boa\.et|awashbank\.com|dashenbank\.com)[^\s]*\/([A-Za-z0-9_-]{6,50})/i);
+    // If it is a CBE Birr / Bank URL with query param ?TID=...
+    const directQueryMatch = str.match(/[?&](?:TID|tid|id|txn|ref)=([A-Za-z0-9_-]{8,50})/i);
+    if (directQueryMatch && directQueryMatch[1]) return directQueryMatch[1].trim().toUpperCase();
+
+    // If it is a CBE / Bank receipt URL pasted directly (ignore words like aureceipt, receipt, invoice)
+    const directUrlMatch = str.match(/https?:\/\/(?:[a-zA-Z0-9-]+\.)*(?:cbe\.com\.et|telebirr\.et|boa\.et|awashbank\.com|dashenbank\.com)[^\s]*\/(?!aureceipt|receipt|invoice|feedback)([A-Za-z0-9_-]{8,50})/i);
     if (directUrlMatch && directUrlMatch[1]) return directUrlMatch[1].trim();
 
     // Direct v2- or receipt hash code (e.g. v2-hfHCxFSmqtLtX7liH8Qm)
@@ -306,42 +310,48 @@ function extractTransactionId(text) {
     }
   }
 
-  // 2. CBE Receipt Link anywhere in text (mbreciept.cbe.com.et, mbreceipt.cbe.com.et, cbe.com.et)
-  const matchCbeUrl = str.match(/https?:\/\/(?:[a-zA-Z0-9-]+\.)*cbe\.com\.et\/([A-Za-z0-9_-]{6,50})/i) ||
-                      str.match(/https?:\/\/[^\s]*mbrec[ie]{2}pt[^\s]*\/([A-Za-z0-9_-]{6,50})/i);
-  if (matchCbeUrl && matchCbeUrl[1]) {
-    return matchCbeUrl[1].trim(); // Must preserve exact case for CBE receipt URL tokens!
-  }
-
-  // 3. Generic receipt URL format: receipt/DHH3VDJ5SH or reciept/DHH3VDJ5SH
-  const matchReceipt = str.match(/rec[ie]{2}pt[/?=]([A-Za-z0-9_-]{8,40})/i);
-  if (matchReceipt && matchReceipt[1]) {
-    const val = matchReceipt[1].trim();
-    return val.startsWith('v2-') ? val : val.toUpperCase();
-  }
-
-  // 4. Multilingual keywords for Ethiopian Languages & English:
+  // 2. Multilingual keywords for Ethiopian Languages & English (Txn ID, Transaction ID, Ref, etc.)
   const matchKeyword = str.match(
-    /(?:transaction\s+(?:number\s+is|id|number|no|code)|txn|txid|ref(?:erence)?(?:\s*no\.?|\s*number|\s*id)?|receipt(?:\s*no\.?|\s*number|\s*id)?|reciept(?:\s*no\.?|\s*number|\s*id)?|የግብይት\s*(?:ቁጥር(?:ዎ)?|መለያ)?|መለያ\s*ቁጥር|የደረሰኝ\s*ቁጥር|lakk(?:oofsa)?\.?\s*(?:daldala(?:a| keessanii)?|dabarsaa|nagahee|ajajaa)?|ቁጽሪ\s*(?:ንግዲ(?:ኹም)?|ትራንዛክሽን|ደረሰኝ)?|lambarka\s*(?:macaamilka|rasiidka|tixraaca)?)\s*[:፡=]?\s*([A-Za-z0-9_-]{8,40})/iu
+    /(?:transaction\s+(?:number\s+is|id|number|no|code)|txn\s*id|txn|txid|ref(?:erence)?(?:\s*no\.?|\s*number|\s*id)?|receipt(?:\s*no\.?|\s*number|\s*id)?|reciept(?:\s*no\.?|\s*number|\s*id)?|የግብይት\s*(?:ቁጥር(?:ዎ)?|መለያ)?|መለያ\s*ቁጥር|የደረሰኝ\s*ቁጥር|lakk(?:oofsa)?\.?\s*(?:daldala(?:a| keessanii)?|dabarsaa|nagahee|ajajaa)?|ቁጽሪ\s*(?:ንግዲ(?:ኹም)?|ትራንዛክሽን|ደረሰኝ)?|lambarka\s*(?:macaamilka|rasiidka|tixraaca)?)\s*[:፡=]?\s*([A-Za-z0-9_-]{8,40})/iu
   );
   if (matchKeyword && matchKeyword[1]) {
     const val = matchKeyword[1].trim();
     return val.startsWith('v2-') ? val : val.toUpperCase();
   }
 
-  // 5. CBE Reference Number pattern (starts with FT followed by alphanumeric)
+  // 3. CBE Birr / Bank URL with query param ?TID=... (e.g. cbepay1.cbe.com.et/aureceipt?TID=DJI21S46O36&PH=...)
+  const matchQueryTid = str.match(/[?&](?:TID|tid|id|txn|ref)=([A-Za-z0-9_-]{8,40})/i);
+  if (matchQueryTid && matchQueryTid[1]) {
+    return matchQueryTid[1].trim().toUpperCase();
+  }
+
+  // 4. CBE Receipt Link path token (e.g. cbe.com.et/v2-...) - ignoring known path words like aureceipt, receipt, invoice
+  const matchCbeUrl = str.match(/https?:\/\/(?:[a-zA-Z0-9-]+\.)*cbe\.com\.et\/(?!aureceipt|receipt|invoice|feedback)([A-Za-z0-9_-]{8,50})/i) ||
+                      str.match(/https?:\/\/[^\s]*mbrec[ie]{2}pt[^\s]*\/([A-Za-z0-9_-]{8,50})/i);
+  if (matchCbeUrl && matchCbeUrl[1]) {
+    return matchCbeUrl[1].trim(); // Must preserve exact case for CBE receipt URL tokens!
+  }
+
+  // 5. Generic receipt URL format: receipt/DHH3VDJ5SH or reciept/DHH3VDJ5SH
+  const matchReceipt = str.match(/rec[ie]{2}pt[/?=]([A-Za-z0-9_-]{8,40})/i);
+  if (matchReceipt && matchReceipt[1]) {
+    const val = matchReceipt[1].trim();
+    return val.startsWith('v2-') ? val : val.toUpperCase();
+  }
+
+  // 6. CBE Reference Number pattern (starts with FT followed by alphanumeric)
   const matchCbeCode = str.match(/\b(FT[A-Za-z0-9]{8,18})\b/i);
   if (matchCbeCode && matchCbeCode[1]) return matchCbeCode[1].trim().toUpperCase();
 
-  // 6. Standard 10-character Telebirr code pattern anywhere in text (e.g. DHH3VDJ5SH, DES8F3QMFM, DHI0VE7AGW)
-  const matchTelebirrCode = str.match(/\b(D[A-Za-z0-9]{9})\b/i);
-  if (matchTelebirrCode && matchTelebirrCode[1]) return matchTelebirrCode[1].trim().toUpperCase();
+  // 7. Telebirr / CBE Birr code (starts with D followed by 9-13 alphanumeric characters)
+  const matchDCode = str.match(/\b(D[A-Za-z0-9]{9,13})\b/i);
+  if (matchDCode && matchDCode[1]) return matchDCode[1].trim().toUpperCase();
 
-  // 7. Standalone v2- receipt code anywhere in text
+  // 8. Standalone v2- receipt code anywhere in text
   const matchV2Code = str.match(/\b(v2-[A-Za-z0-9_-]{8,40})\b/i);
   if (matchV2Code && matchV2Code[1]) return matchV2Code[1].trim();
 
-  // 8. Bank prefixes: BOA, AW, AT, DA, DB
+  // 9. Bank prefixes: BOA, AW, AT, DA, DB
   const matchBankPrefix = str.match(/\b((?:BOA|AW|AT|DA|DB)[A-Za-z0-9]{6,18})\b/i);
   if (matchBankPrefix && matchBankPrefix[1]) return matchBankPrefix[1].trim().toUpperCase();
 
