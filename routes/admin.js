@@ -309,8 +309,9 @@ function getEthiopianTimeMidnightTimestamps() {
 
 router.get('/stats', (req, res) => {
   const platform = req.query.platform || 'all';
+  const bank = req.query.bank || 'all';
   const timestamps = getEthiopianTimeMidnightTimestamps();
-  const stats = getStats(platform, timestamps);
+  const stats = getStats(platform, timestamps, bank);
   res.json(stats);
 });
 
