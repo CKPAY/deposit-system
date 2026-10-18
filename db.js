@@ -94,6 +94,11 @@ try {
   if (!hasTxReceiptImage) {
     db.exec(`ALTER TABLE transactions ADD COLUMN receiptImage TEXT`);
   }
+  const hasTxAssignedAgent = tableInfo.some(col => col.name === 'assignedAgent');
+  if (!hasTxAssignedAgent) {
+    db.exec(`ALTER TABLE transactions ADD COLUMN assignedAgent TEXT`);
+  }
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_tx_assignedAgent ON transactions(assignedAgent)`);
 
   const wTableInfo = db.prepare(`PRAGMA table_info(withdrawals)`).all();
   const hasAssignedAgent = wTableInfo.some(col => col.name === 'assignedAgent');
@@ -129,11 +134,11 @@ const stmtInsertTx = db.prepare(`
   INSERT OR REPLACE INTO transactions (
     id, orderId, userId, requestedAmount, amount, verifiedAmount,
     phoneNumber, status, transactionId, failReason, receipt,
-    createdAt, expiresAt, submittedAt, returnUrl, callbackUrl, platform, bank, accountNumber
+    createdAt, expiresAt, submittedAt, returnUrl, callbackUrl, platform, bank, accountNumber, assignedAgent
   ) VALUES (
     @id, @orderId, @userId, @requestedAmount, @amount, @verifiedAmount,
     @phoneNumber, @status, @transactionId, @failReason, @receipt,
-    @createdAt, @expiresAt, @submittedAt, @returnUrl, @callbackUrl, @platform, @bank, @accountNumber
+    @createdAt, @expiresAt, @submittedAt, @returnUrl, @callbackUrl, @platform, @bank, @accountNumber, @assignedAgent
   )
 `);
 
@@ -158,6 +163,7 @@ function saveTx(tx) {
     platform: String(tx.platform || 'jember').toLowerCase(),
     bank: String(tx.bank || 'telebirr').toLowerCase(),
     accountNumber: tx.accountNumber ? String(tx.accountNumber).trim() : null,
+    assignedAgent: tx.assignedAgent ? String(tx.assignedAgent).trim() : null,
   };
   stmtInsertTx.run(row);
 }
@@ -250,6 +256,10 @@ function updateTxStatus(id, status, updates = {}) {
     fields.push('receiptImage = ?');
     params.push(updates.receiptImage || null);
   }
+  if (updates.assignedAgent !== undefined) {
+    fields.push('assignedAgent = ?');
+    params.push(updates.assignedAgent ? String(updates.assignedAgent).trim() : null);
+  }
 
   params.push(String(id));
   const sql = `UPDATE transactions SET ${fields.join(', ')} WHERE id = ?`;
@@ -291,6 +301,21 @@ function getAllTxs(filters = {}) {
     params.push(String(filters.bank).toLowerCase());
   }
 
+  if (filters.assignedAgent && filters.assignedAgent !== 'all') {
+    if (Array.isArray(filters.accountNumbers) && filters.accountNumbers.length > 0) {
+      const placeholders = filters.accountNumbers.map(() => '?').join(',');
+      conditions.push(`(assignedAgent = ? OR accountNumber IN (${placeholders}))`);
+      params.push(String(filters.assignedAgent), ...filters.accountNumbers);
+    } else {
+      conditions.push(`assignedAgent = ?`);
+      params.push(String(filters.assignedAgent));
+    }
+  } else if (Array.isArray(filters.accountNumbers) && filters.accountNumbers.length > 0) {
+    const placeholders = filters.accountNumbers.map(() => '?').join(',');
+    conditions.push(`accountNumber IN (${placeholders})`);
+    params.push(...filters.accountNumbers);
+  }
+
   if (filters.search) {
     conditions.push(`(userId LIKE ? OR transactionId LIKE ? OR phoneNumber LIKE ? OR id LIKE ? OR accountNumber LIKE ?)`);
     const term = `%${filters.search}%`;
@@ -310,14 +335,21 @@ function getAllTxs(filters = {}) {
   }));
 }
 
-function getStats(platform = 'all', timestamps = {}) {
-  let whereClause = '';
+function getStats(platform = 'all', timestamps = {}, bank = 'all') {
+  let conditions = [];
   const params = [];
 
   if (platform && platform !== 'all') {
-    whereClause = ' WHERE platform = ?';
+    conditions.push('platform = ?');
     params.push(String(platform).toLowerCase());
   }
+
+  if (bank && bank !== 'all') {
+    conditions.push('bank = ?');
+    params.push(String(bank).toLowerCase());
+  }
+
+  const whereClause = conditions.length > 0 ? (' WHERE ' + conditions.join(' AND ')) : '';
 
   const todayStart = Number(timestamps.todayStart) || 0;
   const weekStart = Number(timestamps.weekStart) || 0;
@@ -349,6 +381,7 @@ function getStats(platform = 'all', timestamps = {}) {
 
   return {
     platform,
+    bank,
     total: row.total || 0,
     todayCount: row.todayCount || 0,
     weekCount: row.weekCount || 0,
