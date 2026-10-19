@@ -296,6 +296,7 @@ router.post(['/', '/init', '/request', '/create', '/payout'], (req, res) => {
     return res.status(400).json({ error: 'Invalid withdrawal parameters (missing userId or amount)' });
   }
 
+  const isMasked = (rawPhone && String(rawPhone).includes('*')) || (rawAccount && String(rawAccount).includes('*'));
   const phone = normalizePhone(rawPhone || rawAccount);
   let accountNum = (rawAccount ? String(rawAccount).trim() : '') || (rawPhone ? String(rawPhone).trim() : '');
 
@@ -312,10 +313,12 @@ router.post(['/', '/init', '/request', '/create', '/payout'], (req, res) => {
   }
 
   if (bank === 'telebirr' || bank === 'cbebirr' || bank === 'mpesa') {
-    if (!phone || !/^0[97]\d{8}$/.test(phone)) {
+    if (!isMasked && (!phone || !/^0[97]\d{8}$/.test(phone))) {
       return res.status(400).json({ error: 'Please provide a valid 10-digit Ethiopian mobile number (09... or 07...)' });
     }
-    accountNum = phone;
+    if (!accountNum) {
+      accountNum = phone;
+    }
   } else {
     if (!accountNum) {
       return res.status(400).json({ error: 'Please provide a valid destination bank account number' });
@@ -351,7 +354,7 @@ router.post(['/', '/init', '/request', '/create', '/payout'], (req, res) => {
     orderId: orderId,
     userId: String(userId),
     amount: amount,
-    phoneNumber: phone || accountNum,
+    phoneNumber: isMasked ? accountNum : (phone || accountNum),
     bank: bank,
     accountNumber: accountNum,
     accountHolderName: accountHolder,
