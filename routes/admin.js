@@ -405,7 +405,7 @@ router.post('/bank-account-connect', requireAdminRole, (req, res) => {
   const platform = req.body.platform || 'jember';
   const bank = req.body.bank || 'cbe';
   const slotId = Number(req.body.slotId);
-  const { agent, limit, disconnect, remainingLimit } = req.body;
+  const { agent, limit, disconnect, remainingLimit, additionalLimit } = req.body;
   const p = normalizePlatform(platform);
   const b = String(bank).toLowerCase();
 
@@ -434,18 +434,42 @@ router.post('/bank-account-connect', requireAdminRole, (req, res) => {
   if (agentKey) {
     slot.connectedAgent = agentName;
 
-    // Check if limit is explicitly provided or if agent already has a shared pool
-    let numLimit = (limit !== undefined && limit !== null && limit !== '') ? Number(limit) : null;
-    let numRemaining = (remainingLimit !== undefined && remainingLimit !== null && remainingLimit !== '') ? Number(remainingLimit) : null;
-
     const existingAgentLimit = getAgentLimit(agentKey, fullData);
+    let numLimit = null;
+    let numRemaining = null;
 
-    if (numLimit === null && existingAgentLimit) {
-      numLimit = existingAgentLimit.initialLimit;
-      numRemaining = numRemaining !== null ? numRemaining : existingAgentLimit.remainingLimit;
-    } else if (numLimit !== null && numRemaining === null) {
-      numRemaining = numLimit;
+    if (additionalLimit !== undefined && additionalLimit !== null && additionalLimit !== '') {
+      const addAmt = Number(additionalLimit) || 0;
+      if (existingAgentLimit) {
+        numLimit = existingAgentLimit.initialLimit + addAmt;
+        if (remainingLimit !== undefined && remainingLimit !== null && remainingLimit !== '') {
+          numRemaining = Number(remainingLimit);
+        } else {
+          numRemaining = existingAgentLimit.remainingLimit + addAmt;
+        }
+      } else {
+        numLimit = addAmt > 0 ? addAmt : (Number(limit) || 0);
+        numRemaining = (remainingLimit !== undefined && remainingLimit !== null && remainingLimit !== '')
+          ? Number(remainingLimit)
+          : numLimit;
+      }
+    } else {
+      if (limit !== undefined && limit !== null && limit !== '') {
+        numLimit = Number(limit);
+        numRemaining = (remainingLimit !== undefined && remainingLimit !== null && remainingLimit !== '')
+          ? Number(remainingLimit)
+          : numLimit;
+      } else if (existingAgentLimit) {
+        numLimit = existingAgentLimit.initialLimit;
+        numRemaining = (remainingLimit !== undefined && remainingLimit !== null && remainingLimit !== '')
+          ? Number(remainingLimit)
+          : existingAgentLimit.remainingLimit;
+      }
     }
+
+    slot.initialLimit = numLimit;
+    slot.remainingLimit = numRemaining;
+    writeJSON('bank_accounts.json', fullData);
 
     if (numLimit !== null && !isNaN(numLimit)) {
       setAgentLimit(agentKey, numLimit, numRemaining !== null ? numRemaining : numLimit);
