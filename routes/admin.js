@@ -3,6 +3,12 @@ const router = express.Router();
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const {
+  setAgentLimit,
+  getAgentLimit,
+  getAllAgentPools,
+  normalizeAgent
+} = require('../bankLimits');
 
 const dataDir = path.join(__dirname, '../data');
 
@@ -331,7 +337,22 @@ router.get('/bank-accounts', (req, res) => {
   const platData = fullData[p] || {};
   const accounts = Array.isArray(platData[b]) ? platData[b] : [];
 
-  res.json(accounts);
+  // Ensure accounts connected to agents reflect live shared agent limit
+  const synced = accounts.map(a => {
+    if (a && a.connectedAgent && fullData.agentLimits) {
+      const agKey = normalizeAgent(a.connectedAgent);
+      if (fullData.agentLimits[agKey]) {
+        return {
+          ...a,
+          initialLimit: Number(fullData.agentLimits[agKey].initialLimit) || 0,
+          remainingLimit: Number(fullData.agentLimits[agKey].remainingLimit) || 0
+        };
+      }
+    }
+    return a;
+  });
+
+  res.json(synced);
 });
 
 router.put('/bank-accounts', requireAdminRole, (req, res) => {
@@ -352,12 +373,26 @@ router.put('/bank-accounts', requireAdminRole, (req, res) => {
   // Merge to preserve connectedAgent, initialLimit, remainingLimit if not explicitly passed
   const merged = accounts.map(a => {
     const existing = existingAccs.find(e => e.id === a.id);
+    const agent = (a.connectedAgent !== undefined) ? a.connectedAgent : (existing?.connectedAgent || null);
+    let initLim = (a.initialLimit !== undefined) ? (a.initialLimit === null ? null : Number(a.initialLimit)) : (existing?.initialLimit ?? null);
+    let remLim = (a.remainingLimit !== undefined) ? (a.remainingLimit === null ? null : Number(a.remainingLimit)) : (existing?.remainingLimit ?? null);
+
+    // If connected to agent, pull from shared pool if exists
+    if (agent && fullData.agentLimits) {
+      const agKey = normalizeAgent(agent);
+      if (fullData.agentLimits[agKey]) {
+        initLim = Number(fullData.agentLimits[agKey].initialLimit) || initLim;
+        remLim = Number(fullData.agentLimits[agKey].remainingLimit);
+        if (isNaN(remLim)) remLim = initLim;
+      }
+    }
+
     return {
       ...existing,
       ...a,
-      connectedAgent: (a.connectedAgent !== undefined) ? a.connectedAgent : (existing?.connectedAgent || null),
-      initialLimit: (a.initialLimit !== undefined) ? (a.initialLimit === null ? null : Number(a.initialLimit)) : (existing?.initialLimit ?? null),
-      remainingLimit: (a.remainingLimit !== undefined) ? (a.remainingLimit === null ? null : Number(a.remainingLimit)) : (existing?.remainingLimit ?? null),
+      connectedAgent: agent,
+      initialLimit: initLim,
+      remainingLimit: remLim,
     };
   });
 
@@ -389,25 +424,81 @@ router.post('/bank-account-connect', requireAdminRole, (req, res) => {
     slot.connectedAgent = null;
     slot.initialLimit = null;
     slot.remainingLimit = null;
-  } else {
-    if (agent !== undefined) {
-      slot.connectedAgent = agent ? String(agent).trim() : null;
+    writeJSON('bank_accounts.json', fullData);
+    return res.json({ success: true, platform: p, bank: b, slot, accounts: fullData[p][b] });
+  }
+
+  const agentName = agent ? String(agent).trim() : null;
+  const agentKey = normalizeAgent(agentName);
+
+  if (agentKey) {
+    slot.connectedAgent = agentName;
+
+    // Check if limit is explicitly provided or if agent already has a shared pool
+    let numLimit = (limit !== undefined && limit !== null && limit !== '') ? Number(limit) : null;
+    let numRemaining = (remainingLimit !== undefined && remainingLimit !== null && remainingLimit !== '') ? Number(remainingLimit) : null;
+
+    const existingAgentLimit = getAgentLimit(agentKey, fullData);
+
+    if (numLimit === null && existingAgentLimit) {
+      numLimit = existingAgentLimit.initialLimit;
+      numRemaining = numRemaining !== null ? numRemaining : existingAgentLimit.remainingLimit;
+    } else if (numLimit !== null && numRemaining === null) {
+      numRemaining = numLimit;
     }
-    if (limit !== undefined) {
+
+    if (numLimit !== null && !isNaN(numLimit)) {
+      setAgentLimit(agentKey, numLimit, numRemaining !== null ? numRemaining : numLimit);
+      const updatedData = readJSON('bank_accounts.json') || {};
+      const updatedSlot = updatedData[p]?.[b]?.find(a => a.id === slotId) || slot;
+      return res.json({ success: true, platform: p, bank: b, slot: updatedSlot, accounts: updatedData[p]?.[b] || [] });
+    } else {
+      slot.initialLimit = null;
+      slot.remainingLimit = null;
+    }
+  } else {
+    // Standalone limit without agent
+    slot.connectedAgent = null;
+    if (limit !== undefined && limit !== null && limit !== '') {
       const numLimit = Number(limit);
       slot.initialLimit = isNaN(numLimit) ? 0 : numLimit;
-      if (remainingLimit === undefined) {
+      if (remainingLimit === undefined || remainingLimit === null || remainingLimit === '') {
         slot.remainingLimit = slot.initialLimit;
+      } else {
+        const numRemaining = Number(remainingLimit);
+        slot.remainingLimit = isNaN(numRemaining) ? 0 : numRemaining;
       }
-    }
-    if (remainingLimit !== undefined) {
-      const numRemaining = Number(remainingLimit);
-      slot.remainingLimit = isNaN(numRemaining) ? 0 : numRemaining;
+    } else {
+      slot.initialLimit = null;
+      slot.remainingLimit = null;
     }
   }
 
   writeJSON('bank_accounts.json', fullData);
   res.json({ success: true, platform: p, bank: b, slot, accounts: fullData[p][b] });
+});
+
+router.get('/agent-pools', requireAdminRole, (req, res) => {
+  const pools = getAllAgentPools();
+  res.json({ success: true, pools });
+});
+
+router.post('/agent-limit', requireAdminRole, (req, res) => {
+  const { agent, limit, remainingLimit } = req.body;
+  if (!agent) {
+    return res.status(400).json({ error: 'Agent username is required' });
+  }
+  const numLimit = Number(limit);
+  if (isNaN(numLimit) || numLimit < 0) {
+    return res.status(400).json({ error: 'Valid limit number required' });
+  }
+  const numRemaining = (remainingLimit !== undefined && remainingLimit !== null && !isNaN(Number(remainingLimit)))
+    ? Number(remainingLimit)
+    : numLimit;
+
+  const updated = setAgentLimit(agent, numLimit, numRemaining);
+  const pools = getAllAgentPools();
+  res.json({ success: true, agent, limit: updated, pools });
 });
 
 router.get('/bank-status', (req, res) => {
