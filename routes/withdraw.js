@@ -903,4 +903,34 @@ router.post('/reject', requireStaffAuth, (req, res) => {
   });
 });
 
+router.post('/reassign', requireStaffAuth, (req, res) => {
+  const session = req.adminSession;
+  if (!session) return res.status(401).json({ error: 'Unauthorized' });
+
+  const isFullAdmin = session.isSuperAdmin || session.role === 'superadmin' || session.role === 'admin';
+  if (!isFullAdmin) {
+    return res.status(403).json({ error: 'Permission denied: Only administrators can reassign withdrawals.' });
+  }
+
+  const { sessionId, newAgent } = req.body;
+  if (!sessionId || !newAgent) {
+    return res.status(400).json({ error: 'Missing sessionId or newAgent' });
+  }
+
+  const cleanAgent = String(newAgent).trim();
+  const w = getWithdrawalById(sessionId) || getWithdrawalByOrderId(sessionId);
+  if (!w) {
+    return res.status(404).json({ error: 'Withdrawal not found' });
+  }
+
+  db.prepare('UPDATE withdrawals SET assignedAgent = ? WHERE id = ?').run(cleanAgent, w.id);
+  const updated = getWithdrawalById(w.id);
+
+  res.json({
+    success: true,
+    message: `Withdrawal reassigned to ${cleanAgent}`,
+    withdrawal: updated
+  });
+});
+
 module.exports = router;
