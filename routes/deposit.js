@@ -559,10 +559,17 @@ router.get('/active-banks', (req, res) => {
   });
 });
 
-router.post('/init', (req, res) => {
+router.post(['/', '/init', '/create', '/request', '/invoice'], (req, res) => {
   let tokenPayload = {};
   let detectedPlatformFromToken = null;
   const rawToken = req.body.token || req.headers['x-ckpay-token'] || null;
+  console.log('[Deposit Init] incoming request:', {
+    platform: req.body?.platform,
+    bank: req.body?.bank,
+    amount: req.body?.amount,
+    userId: req.body?.userId || req.body?.account_id,
+    hasToken: !!rawToken
+  });
 
   if (rawToken) {
     // Check against each platform secret (jember, bravobirr, abay, walta)
