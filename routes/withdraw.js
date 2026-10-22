@@ -758,17 +758,18 @@ router.get('/agent-accounts', requireStaffAuth, (req, res) => {
   const session = req.adminSession;
   const isFullAdmin = session?.isSuperAdmin || session?.role === 'superadmin' || session?.role === 'admin';
   const targetAgent = req.query.agent;
+  const platform = req.query.platform;
 
   if (isFullAdmin) {
     if (targetAgent && targetAgent !== 'all') {
-      return res.json(getAgentConnectedAccounts(targetAgent));
+      return res.json(getAgentConnectedAccounts(targetAgent, platform));
     }
-    return res.json(getAllConnectedAccounts());
+    return res.json(getAllConnectedAccounts(platform));
   }
 
   const username = session?.username;
   if (!username) return res.json([]);
-  return res.json(getAgentConnectedAccounts(username));
+  return res.json(getAgentConnectedAccounts(username, platform));
 });
 
 // Get deposits for the logged-in agent (processed on their connected bank accounts)
@@ -780,8 +781,8 @@ router.get('/agent-deposits', requireStaffAuth, (req, res) => {
   const { platform, status, search, bank } = req.query;
 
   const connected = (isFullAdmin && (!targetAgent || targetAgent === 'all'))
-    ? getAllConnectedAccounts()
-    : getAgentConnectedAccounts(username);
+    ? getAllConnectedAccounts(platform)
+    : getAgentConnectedAccounts(username, platform);
   const accountNumbers = connected.map(a => a.account).filter(Boolean);
 
   const filters = {
@@ -804,21 +805,22 @@ router.get('/agent-deposit-stats', requireStaffAuth, (req, res) => {
 
   const isFullAdmin = session.isSuperAdmin || session.role === 'superadmin' || session.role === 'admin';
   const targetAgent = req.query.agent;
+  const platform = req.query.platform;
 
   let connected = [];
   let usernameForQuery = null;
 
   if (isFullAdmin) {
     if (targetAgent && targetAgent !== 'all') {
-      connected = getAgentConnectedAccounts(targetAgent);
+      connected = getAgentConnectedAccounts(targetAgent, platform);
       usernameForQuery = targetAgent;
     } else {
-      connected = getAllConnectedAccounts();
+      connected = getAllConnectedAccounts(platform);
       usernameForQuery = null;
     }
   } else {
     usernameForQuery = session.username;
-    connected = getAgentConnectedAccounts(usernameForQuery);
+    connected = getAgentConnectedAccounts(usernameForQuery, platform);
   }
 
   const accountNumbers = connected.map(a => a.account).filter(Boolean);
