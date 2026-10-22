@@ -15,16 +15,17 @@
 const fs = require('fs');
 const path = require('path');
 
-const backendDir = (() => {
-  if (fs.existsSync(path.join(__dirname, '../backend'))) return path.join(__dirname, '../backend');
+const baseDir = (() => {
   if (fs.existsSync(path.join(__dirname, '../routes/admin.js'))) return path.join(__dirname, '..');
-  if (fs.existsSync(path.join(process.cwd(), 'backend'))) return path.join(process.cwd(), 'backend');
+  if (fs.existsSync(path.join(__dirname, '../backend/routes/admin.js'))) return path.join(__dirname, '../backend');
+  if (fs.existsSync(path.join(process.cwd(), 'routes/admin.js'))) return process.cwd();
+  if (fs.existsSync(path.join(process.cwd(), 'backend/routes/admin.js'))) return path.join(process.cwd(), 'backend');
   return path.join(__dirname, '..');
 })();
 
-const { getEthiopianTimeMidnightTimestamps } = require(path.join(backendDir, 'routes/admin'));
-const { readJSON, writeJSON, normalizeAgent, normalizePlatform } = require(path.join(backendDir, 'bankLimits'));
-const { db } = require(path.join(backendDir, 'db'));
+const { getEthiopianTimeMidnightTimestamps } = require(path.join(baseDir, 'routes/admin'));
+const { readJSON, writeJSON, normalizeAgent, normalizePlatform } = require(path.join(baseDir, 'bankLimits'));
+const { db } = require(path.join(baseDir, 'db'));
 
 const args = process.argv.slice(2);
 const isApply = args.includes('--apply');
