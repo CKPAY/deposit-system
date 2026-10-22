@@ -642,6 +642,8 @@ router.put('/bank-status', requireAdminRole, (req, res) => {
   if (!fullData[p]) fullData[p] = {};
   if (!fullData[p].bankStatus) fullData[p].bankStatus = {};
   fullData[p].bankStatus[b] = enabled;
+  if (b === 'ebirr') fullData[p].bankStatus['siinqee'] = enabled;
+  if (b === 'siinqee') fullData[p].bankStatus['ebirr'] = enabled;
 
   writeJSON('bank_accounts.json', fullData);
   res.json({ success: true, platform: p, bank: b, enabled });
