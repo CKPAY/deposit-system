@@ -282,7 +282,11 @@ function isBankEnabled(platform = 'jember', bank = 'cbe') {
   const raw = readJSON('bank_accounts.json') || {};
   const platData = raw[p] || {};
   const status = platData.bankStatus || {};
-  if (status[b] === false || (b === 'ebirr' && status['siinqee'] === false)) {
+  const bankStatusVal = (b === 'ebirr')
+    ? (status.ebirr !== undefined ? status.ebirr : status.siinqee)
+    : status[b];
+
+  if (bankStatusVal === false) {
     return false;
   }
   if ((b === 'cbeagent' || b === 'cbe_agent') && status[b] === undefined) {
@@ -291,9 +295,12 @@ function isBankEnabled(platform = 'jember', bank = 'cbe') {
     if (status['cbe'] !== undefined) return status['cbe'] !== false;
   }
   const SUPPORTED_7_BANKS = ['cbe', 'boa', 'cbebirr', 'awash', 'dashen', 'cbeagent', 'ebirr'];
-  const hasAnyExplicitTrue = SUPPORTED_7_BANKS.some(bk => status[bk] === true);
+  const hasAnyExplicitTrue = SUPPORTED_7_BANKS.some(bk => {
+    if (bk === 'ebirr') return status.ebirr === true || status.siinqee === true;
+    return status[bk] === true;
+  });
   if (hasAnyExplicitTrue) {
-    if (status[b] === true || (b === 'ebirr' && status['siinqee'] === true)) return true;
+    if (bankStatusVal === true) return true;
     if ((b === 'cbeagent' || b === 'cbe_agent') && (status['mpesa'] === true || status['cbe'] === true)) return true;
     return false;
   }
@@ -559,7 +566,10 @@ router.get('/active-banks', (req, res) => {
 
   const SUPPORTED_7_BANKS = ['cbe', 'boa', 'cbebirr', 'awash', 'dashen', 'cbeagent', 'ebirr'];
 
-  const hasAnyExplicitTrue = SUPPORTED_7_BANKS.some(b => status[b] === true || (b === 'cbeagent' && (status['mpesa'] === true || status['cbe'] === true)));
+  const hasAnyExplicitTrue = SUPPORTED_7_BANKS.some(b => {
+    if (b === 'ebirr') return status.ebirr === true || status.siinqee === true;
+    return status[b] === true || (b === 'cbeagent' && (status['mpesa'] === true || status['cbe'] === true));
+  });
   const hasAnyConfiguredAccounts = SUPPORTED_7_BANKS.some(b => {
     let accs = Array.isArray(platData[b]) ? platData[b] : [];
     if (b === 'cbeagent' && accs.length === 0) accs = Array.isArray(platData['cbe']) ? platData['cbe'] : [];
@@ -568,14 +578,19 @@ router.get('/active-banks', (req, res) => {
 
   const activeBanks = SUPPORTED_7_BANKS.filter(b => {
     // If explicitly disabled in admin bankStatus, exclude
-    if (status[b] === false) return false;
+    const bStatus = (b === 'ebirr') ? (status.ebirr !== undefined ? status.ebirr : status.siinqee) : status[b];
+    if (bStatus === false) return false;
     if (b === 'cbeagent' && status['cbeagent'] === undefined) {
       if (status['mpesa'] === false || status['cbe'] === false) return false;
     }
 
     // If admin explicitly set some bank(s) to true, ONLY include banks where status[b] === true
     if (hasAnyExplicitTrue) {
-      if (status[b] !== true && !(b === 'cbeagent' && (status['mpesa'] === true || status['cbe'] === true))) return false;
+      if (b === 'ebirr') {
+        if (status.ebirr !== true && status.siinqee !== true) return false;
+      } else if (status[b] !== true && !(b === 'cbeagent' && (status['mpesa'] === true || status['cbe'] === true))) {
+        return false;
+      }
     }
 
     // If admin has configured accounts for any banks, only include banks that have at least one available account:
@@ -602,6 +617,12 @@ router.get('/active-banks', (req, res) => {
   const settings = getPlatformSettings(p);
 
   const enrichedStatus = { ...status };
+  if (enrichedStatus.ebirr === undefined && enrichedStatus.siinqee !== undefined) {
+    enrichedStatus.ebirr = enrichedStatus.siinqee;
+  }
+  if (enrichedStatus.siinqee === undefined && enrichedStatus.ebirr !== undefined) {
+    enrichedStatus.siinqee = enrichedStatus.ebirr;
+  }
   if (enrichedStatus.cbeagent === undefined) {
     enrichedStatus.cbeagent = enrichedStatus.mpesa !== undefined ? enrichedStatus.mpesa : (enrichedStatus.cbe !== undefined ? enrichedStatus.cbe : true);
   }
