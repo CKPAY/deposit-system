@@ -254,15 +254,20 @@ function deductBankDepositLimit(platform, bank, accountNumber, amount) {
 
     writeJSON('bank_accounts.json', fullData);
 
-    if (b === 'telebirr') {
-      const numData = readJSON('numbers.json') || {};
-      if (numData[p] && Array.isArray(numData[p].numbers)) {
-        numData[p].numbers.forEach(n => {
+    const numData = readJSON('numbers.json');
+    if (numData) {
+      let numChanged = false;
+      for (const [pl, pData] of Object.entries(numData)) {
+        if (!pData || !Array.isArray(pData.numbers)) continue;
+        pData.numbers.forEach(n => {
           if (n && normalizeAgent(n.connectedAgent) === agentKey) {
             n.initialLimit = currentInit;
             n.remainingLimit = newRemaining;
+            numChanged = true;
           }
         });
+      }
+      if (numChanged) {
         writeJSON('numbers.json', numData);
       }
     }
@@ -358,6 +363,26 @@ function increaseBankWithdrawLimit(platform, bank, agentUsername, amount, specif
       }
 
       writeJSON('bank_accounts.json', fullData);
+
+      // Also sync to numbers.json for telebirr slots connected to this agent
+      const numData = readJSON('numbers.json');
+      if (numData) {
+        let numChanged = false;
+        for (const [pl, pData] of Object.entries(numData)) {
+          if (!pData || !Array.isArray(pData.numbers)) continue;
+          pData.numbers.forEach(n => {
+            if (n && normalizeAgent(n.connectedAgent) === agentKey) {
+              n.initialLimit = cap;
+              n.remainingLimit = newRemaining;
+              numChanged = true;
+            }
+          });
+        }
+        if (numChanged) {
+          writeJSON('numbers.json', numData);
+        }
+      }
+
       console.log(`[Bank Limit] Withdrawal ${amt} ETB replenished shared agent pool '${agentKey}'. Prev: ${currentRem}, New Remaining: ${newRemaining} (cap: ${cap})`);
       return { agent: agentKey, initialLimit: cap, remainingLimit: newRemaining };
     }
@@ -382,9 +407,10 @@ function increaseBankWithdrawLimit(platform, bank, agentUsername, amount, specif
 /**
  * Get all bank accounts connected to a specific agent across all platforms and banks.
  */
-function getAgentConnectedAccounts(agentUsername) {
+function getAgentConnectedAccounts(agentUsername, platformFilter) {
   if (!agentUsername) return [];
   const uName = normalizeAgent(agentUsername);
+  const pFilter = platformFilter && platformFilter !== 'all' ? normalizePlatform(platformFilter) : null;
   const fullData = readJSON('bank_accounts.json') || {};
   const connected = [];
 
@@ -392,7 +418,9 @@ function getAgentConnectedAccounts(agentUsername) {
 
   for (const [plat, bankMap] of Object.entries(fullData)) {
     if (typeof bankMap !== 'object' || !bankMap || plat === 'agentLimits') continue;
+    if (pFilter && plat !== pFilter) continue;
     for (const [bank, accs] of Object.entries(bankMap)) {
+      if (bank === 'telebirr') continue;
       if (!Array.isArray(accs)) continue;
       accs.forEach(acc => {
         if (acc && normalizeAgent(acc.connectedAgent) === uName) {
@@ -413,14 +441,15 @@ function getAgentConnectedAccounts(agentUsername) {
       });
     }
   }
+
   // Also check numbers.json for telebirr
   const numData = readJSON('numbers.json') || {};
   for (const [plat, pObj] of Object.entries(numData)) {
     if (typeof pObj !== 'object' || !pObj || !Array.isArray(pObj.numbers)) continue;
+    if (pFilter && plat !== pFilter) continue;
     pObj.numbers.forEach(n => {
-      if (n && n.connectedAgent) {
-        const ag = normalizeAgent(n.connectedAgent);
-        const agentLim = (fullData.agentLimits && fullData.agentLimits[ag]) ? fullData.agentLimits[ag] : null;
+      if (n && n.connectedAgent && normalizeAgent(n.connectedAgent) === uName) {
+        const agentLim = (fullData.agentLimits && fullData.agentLimits[uName]) ? fullData.agentLimits[uName] : null;
         const already = connected.some(c => c.bank === 'telebirr' && (c.account === n.phone || (c.platform === plat && c.id === n.id)));
         if (!already) {
           const init = agentLim ? Number(agentLim.initialLimit) : Number(n.initialLimit) || 0;
@@ -447,13 +476,16 @@ function getAgentConnectedAccounts(agentUsername) {
 /**
  * Get all connected bank accounts across all agents, platforms, and banks.
  */
-function getAllConnectedAccounts() {
+function getAllConnectedAccounts(platformFilter) {
+  const pFilter = platformFilter && platformFilter !== 'all' ? normalizePlatform(platformFilter) : null;
   const fullData = readJSON('bank_accounts.json') || {};
   const connected = [];
 
   for (const [plat, bankMap] of Object.entries(fullData)) {
     if (typeof bankMap !== 'object' || !bankMap || plat === 'agentLimits') continue;
+    if (pFilter && plat !== pFilter) continue;
     for (const [bank, accs] of Object.entries(bankMap)) {
+      if (bank === 'telebirr') continue;
       if (!Array.isArray(accs)) continue;
       accs.forEach(acc => {
         if (acc && acc.connectedAgent) {
@@ -477,10 +509,12 @@ function getAllConnectedAccounts() {
       });
     }
   }
+
   // Also check numbers.json for telebirr
   const numData = readJSON('numbers.json') || {};
   for (const [plat, pObj] of Object.entries(numData)) {
     if (typeof pObj !== 'object' || !pObj || !Array.isArray(pObj.numbers)) continue;
+    if (pFilter && plat !== pFilter) continue;
     pObj.numbers.forEach(n => {
       if (n && n.connectedAgent) {
         const ag = normalizeAgent(n.connectedAgent);
@@ -531,6 +565,7 @@ function getAllAgentPools() {
   for (const [plat, bankMap] of Object.entries(fullData)) {
     if (typeof bankMap !== 'object' || !bankMap || plat === 'agentLimits') continue;
     for (const [bank, accs] of Object.entries(bankMap)) {
+      if (bank === 'telebirr') continue;
       if (!Array.isArray(accs)) continue;
       accs.forEach(acc => {
         if (acc && acc.connectedAgent) {
