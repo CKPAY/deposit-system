@@ -527,7 +527,7 @@ function getAllAgentPools() {
     }
   }
 
-  // Next collect accounts
+  // Next collect accounts from bank_accounts.json
   for (const [plat, bankMap] of Object.entries(fullData)) {
     if (typeof bankMap !== 'object' || !bankMap || plat === 'agentLimits') continue;
     for (const [bank, accs] of Object.entries(bankMap)) {
@@ -554,6 +554,36 @@ function getAllAgentPools() {
         }
       });
     }
+  }
+
+  // Also collect Telebirr numbers from numbers.json
+  const numData = readJSON('numbers.json') || {};
+  for (const [plat, pObj] of Object.entries(numData)) {
+    if (typeof pObj !== 'object' || !pObj || !Array.isArray(pObj.numbers)) continue;
+    pObj.numbers.forEach(n => {
+      if (n && n.connectedAgent) {
+        const ag = normalizeAgent(n.connectedAgent);
+        if (!pools[ag]) {
+          pools[ag] = {
+            agent: ag,
+            initialLimit: Number(n.initialLimit) || 0,
+            remainingLimit: (n.remainingLimit !== undefined && n.remainingLimit !== null) ? Number(n.remainingLimit) : Number(n.initialLimit) || 0,
+            accounts: []
+          };
+        }
+        const already = pools[ag].accounts.some(a => a.bank === 'telebirr' && (a.account === n.phone || (a.platform === plat && a.id === n.id)));
+        if (!already) {
+          pools[ag].accounts.push({
+            platform: plat,
+            bank: 'telebirr',
+            id: n.id,
+            account: n.phone,
+            label: n.label || `Account ${n.id}`,
+            active: n.active !== false
+          });
+        }
+      }
+    });
   }
 
   return Object.values(pools);
