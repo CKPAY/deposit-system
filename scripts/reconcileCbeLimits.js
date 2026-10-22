@@ -2,13 +2,14 @@
 /**
  * reconcileCbeLimits.js
  * 
- * Inspects all verified CBE / CBE Agent deposits processed today in SQLite,
- * matches them against connected agent accounts in bank_accounts.json,
+ * Inspects all verified deposits & completed withdrawals processed today in SQLite,
+ * matches them against connected agent accounts across all banks and Telebirr,
  * and accurately adjusts the agent float pools so agents cannot keep unaccounted float.
  * 
  * Usage:
  *   node backend/scripts/reconcileCbeLimits.js [--dry-run]
  *   node backend/scripts/reconcileCbeLimits.js --apply
+ *   node backend/scripts/reconcileCbeLimits.js --bank cbe [--apply]
  */
 
 const fs = require('fs');
@@ -19,9 +20,12 @@ const { db } = require('../db');
 
 const args = process.argv.slice(2);
 const isApply = args.includes('--apply');
+const bankFilterIdx = args.indexOf('--bank');
+const bankFilter = bankFilterIdx !== -1 && args[bankFilterIdx + 1] ? args[bankFilterIdx + 1].toLowerCase().trim() : null;
 
 console.log('='.repeat(70));
-console.log(`CBE FLOAT POOL RECONCILIATION & RECOVERY (${isApply ? 'APPLY MODE' : 'DRY-RUN / AUDIT MODE'})`);
+console.log(`AGENT FLOAT POOL RECONCILIATION & RECOVERY (${isApply ? 'APPLY MODE' : 'DRY-RUN / AUDIT MODE'})`);
+if (bankFilter) console.log(`Filtering to bank: ${bankFilter.toUpperCase()}`);
 console.log('='.repeat(70));
 
 const bankData = readJSON('bank_accounts.json') || {};
@@ -31,70 +35,121 @@ const todayStart = Number(timestamps.todayStart) || 0;
 
 console.log('Audit window (Ethiopian Today Start):', new Date(todayStart).toISOString());
 
-// 1. Collect all connected agent CBE accounts
-const agentCbeAccounts = []; // { agent, platform, bank, account, cleanAcc }
+function normalizePhone(p) {
+  if (!p) return '';
+  let str = String(p).replace(/\D/g, '');
+  if (str.startsWith('251')) str = '0' + str.slice(3);
+  if (str.length === 9 && (str.startsWith('9') || str.startsWith('7'))) str = '0' + str;
+  return str;
+}
+
+function matchAccount(creditedStr, slotAcc) {
+  if (!creditedStr || !slotAcc) return false;
+  const sRaw = String(slotAcc).trim().toLowerCase();
+  const tRaw = String(creditedStr).trim().toLowerCase();
+  if (sRaw === tRaw) return true;
+
+  const sNormPhone = normalizePhone(sRaw);
+  const tNormPhone = normalizePhone(tRaw);
+  if (sNormPhone && tNormPhone && sNormPhone === tNormPhone) return true;
+
+  const sClean = sRaw.replace(/\D/g, '');
+  const tClean = tRaw.replace(/\D/g, '');
+  if (!sClean || !tClean) return false;
+
+  if (tRaw.includes('*')) {
+    const parts = tRaw.split(/\*+/);
+    let prefix = parts[0] ? parts[0].replace(/\D/g, '') : '';
+    let suffix = parts[parts.length - 1] ? parts[parts.length - 1].replace(/\D/g, '') : '';
+
+    if (prefix.startsWith('2519') || prefix === '9' || prefix === '09') prefix = '09';
+    else if (prefix.startsWith('2517') || prefix === '7' || prefix === '07') prefix = '07';
+
+    const checkStr = sNormPhone || sClean;
+    if (prefix && !checkStr.startsWith(prefix)) return false;
+    if (suffix && !checkStr.endsWith(suffix)) return false;
+    return true;
+  }
+
+  if (sClean === tClean) return true;
+  if (sClean.length >= 6 && tClean.length >= 6) {
+    return sClean.endsWith(tClean) || tClean.endsWith(sClean);
+  }
+  return false;
+}
+
+// 1. Collect all connected agent accounts (all banks and Telebirr)
+const connectedAgentAccounts = []; // { agent, rawAgent, platform, bank, id, account }
+
 for (const [platform, bMap] of Object.entries(bankData)) {
   if (!bMap || typeof bMap !== 'object' || platform === 'agentLimits') continue;
-  for (const b of ['cbe', 'cbeagent', 'cbe_agent']) {
-    const accs = bMap[b];
+  for (const [b, accs] of Object.entries(bMap)) {
+    if (b === 'telebirr') continue;
+    if (bankFilter && !b.includes(bankFilter)) continue;
     if (!Array.isArray(accs)) continue;
     accs.forEach(slot => {
       if (slot && slot.connectedAgent && slot.account && slot.account.trim()) {
-        const cleanAcc = slot.account.trim().replace(/\D/g, '');
-        agentCbeAccounts.push({
+        connectedAgentAccounts.push({
           agent: normalizeAgent(slot.connectedAgent),
           rawAgent: slot.connectedAgent,
           platform,
           bank: b,
           id: slot.id,
-          account: slot.account.trim(),
-          cleanAcc
+          account: slot.account.trim()
         });
       }
     });
   }
 }
 
-console.log(`\nFound ${agentCbeAccounts.length} connected CBE / CBE Agent account slots:`);
-agentCbeAccounts.forEach(a => {
+// Collect Telebirr connected numbers
+if (!bankFilter || bankFilter === 'telebirr') {
+  for (const [platform, pData] of Object.entries(numData)) {
+    if (!pData || !Array.isArray(pData.numbers)) continue;
+    pData.numbers.forEach(slot => {
+      if (slot && slot.connectedAgent && slot.phone && slot.phone.trim()) {
+        connectedAgentAccounts.push({
+          agent: normalizeAgent(slot.connectedAgent),
+          rawAgent: slot.connectedAgent,
+          platform,
+          bank: 'telebirr',
+          id: slot.id,
+          account: slot.phone.trim()
+        });
+      }
+    });
+  }
+}
+
+console.log(`\nFound ${connectedAgentAccounts.length} connected account slots:`);
+connectedAgentAccounts.forEach(a => {
   console.log(`  - Agent [${a.rawAgent}] | ${a.platform.toUpperCase()} | ${a.bank.toUpperCase()} slot #${a.id}: ${a.account}`);
 });
 
-// 2. Query all verified deposits today from SQLite for cbe and cbeagent
-const verifiedToday = db.prepare(`
+// 2. Query all verified deposits today from SQLite
+let depositSql = `
   SELECT id, platform, bank, amount, verifiedAmount, phoneNumber, accountNumber, assignedAgent, status, createdAt, receipt
   FROM transactions
-  WHERE (bank = 'cbe' OR bank = 'cbeagent' OR bank = 'cbe_agent')
-    AND status = 'verified'
+  WHERE status = 'verified'
     AND createdAt >= ?
-  ORDER BY createdAt ASC
-`).all(todayStart);
+`;
+const depositParams = [todayStart];
 
-console.log(`\nFound ${verifiedToday.length} verified CBE / CBE Agent deposit transactions today.`);
-
-// 3. Match transactions to agents
-const agentDepositTotals = {}; // agentKey -> { totalETB: number, count: number, txs: [] }
-
-function matchAccount(creditedStr, cleanSlotAcc) {
-  if (!creditedStr || !cleanSlotAcc) return false;
-  const raw = String(creditedStr).trim();
-  const digits = raw.replace(/\D/g, '');
-  if (!digits) return false;
-
-  if (raw.includes('*')) {
-    const parts = raw.split(/\*+/);
-    const prefix = parts[0] ? parts[0].replace(/\D/g, '') : '';
-    const suffix = parts[parts.length - 1] ? parts[parts.length - 1].replace(/\D/g, '') : '';
-    if (prefix && !cleanSlotAcc.startsWith(prefix)) return false;
-    if (suffix && !cleanSlotAcc.endsWith(suffix)) return false;
-    return true;
+if (bankFilter) {
+  if (bankFilter === 'cbe') {
+    depositSql += ` AND (bank = 'cbe' OR bank = 'cbeagent' OR bank = 'cbe_agent')`;
+  } else {
+    depositSql += ` AND bank = ?`;
+    depositParams.push(bankFilter);
   }
-  if (digits === cleanSlotAcc) return true;
-  if (digits.length >= 6 && cleanSlotAcc.length >= 6) {
-    return cleanSlotAcc.endsWith(digits) || digits.endsWith(cleanSlotAcc);
-  }
-  return false;
 }
+depositSql += ` ORDER BY createdAt ASC`;
+
+const verifiedToday = db.prepare(depositSql).all(...depositParams);
+console.log(`\nFound ${verifiedToday.length} verified deposit transactions today.`);
+
+// 3. Match deposit transactions to agents
+const agentDepositTotals = {}; // agentKey -> { totalETB: number, count: number, byBank: {}, txs: [] }
 
 verifiedToday.forEach(tx => {
   const amt = Number(tx.verifiedAmount || tx.amount || 0);
@@ -103,17 +158,14 @@ verifiedToday.forEach(tx => {
     receiptObj = tx.receipt ? (typeof tx.receipt === 'string' ? JSON.parse(tx.receipt) : tx.receipt) : null;
   } catch {}
 
-  const credited = receiptObj ? (receiptObj.creditedAccount || receiptObj.receiver) : null;
+  const hasDigitsOrMask = (str) => str && (/\d/.test(String(str)) || String(str).includes('*'));
+  const credited = hasDigitsOrMask(receiptObj?.creditedAccount) ? receiptObj.creditedAccount : null;
   const targetAcc = credited || tx.accountNumber || tx.phoneNumber;
 
-  // Find matching agent
   let matchedAgent = null;
-  let matchedSlot = null;
-
-  for (const slot of agentCbeAccounts) {
-    if (matchAccount(targetAcc, slot.cleanAcc)) {
+  for (const slot of connectedAgentAccounts) {
+    if (matchAccount(targetAcc, slot.account)) {
       matchedAgent = slot.agent;
-      matchedSlot = slot;
       break;
     }
   }
@@ -125,10 +177,12 @@ verifiedToday.forEach(tx => {
 
   if (matchedAgent) {
     if (!agentDepositTotals[matchedAgent]) {
-      agentDepositTotals[matchedAgent] = { totalETB: 0, count: 0, txs: [] };
+      agentDepositTotals[matchedAgent] = { totalETB: 0, count: 0, byBank: {}, txs: [] };
     }
     agentDepositTotals[matchedAgent].totalETB += amt;
     agentDepositTotals[matchedAgent].count += 1;
+    const bk = tx.bank || 'telebirr';
+    agentDepositTotals[matchedAgent].byBank[bk] = (agentDepositTotals[matchedAgent].byBank[bk] || 0) + amt;
     agentDepositTotals[matchedAgent].txs.push({
       id: tx.id,
       amount: amt,
@@ -138,27 +192,56 @@ verifiedToday.forEach(tx => {
       time: new Date(tx.createdAt).toLocaleTimeString()
     });
   } else {
-    console.log(`[Unlinked] Tx #${tx.id} for ${amt} ETB (Account: ${targetAcc}) did not match any connected CBE agent.`);
+    console.log(`[Unlinked] Tx #${tx.id} for ${amt} ETB (${tx.bank} Account: ${targetAcc}) did not match any connected agent.`);
   }
 });
 
-// 4. Report & Adjust Float Pools
+// 4. Query completed withdrawals today for agents to factor in legitimate replenishments
+const completedWithdrawals = db.prepare(`
+  SELECT id, platform, bank, amount, processedBy, assignedAgent, createdAt
+  FROM withdrawals
+  WHERE status = 'completed'
+    AND createdAt >= ?
+`).all(todayStart);
+
+const agentWithdrawalTotals = {}; // agentKey -> number
+completedWithdrawals.forEach(w => {
+  const ag = normalizeAgent(w.assignedAgent || w.processedBy);
+  if (ag && ag !== 'admin') {
+    const amt = Number(w.amount) || 0;
+    agentWithdrawalTotals[ag] = (agentWithdrawalTotals[ag] || 0) + amt;
+  }
+});
+
+// 5. Report & Adjust Float Pools
 console.log('\n' + '-'.repeat(70));
 console.log('RECONCILIATION SUMMARY PER AGENT:');
 console.log('-'.repeat(70));
 
-if (Object.keys(agentDepositTotals).length === 0) {
-  console.log('No agent-linked CBE deposits found for today.');
+const allTargetAgents = new Set([...Object.keys(agentDepositTotals), ...Object.keys(agentWithdrawalTotals)]);
+
+if (allTargetAgents.size === 0) {
+  console.log('No agent-linked transactions found for today.');
 }
 
-for (const [agentKey, stat] of Object.entries(agentDepositTotals)) {
+for (const agentKey of allTargetAgents) {
+  const stat = agentDepositTotals[agentKey] || { totalETB: 0, count: 0, byBank: {} };
+  const withdrawTotal = agentWithdrawalTotals[agentKey] || 0;
+
   const pool = bankData.agentLimits && bankData.agentLimits[agentKey];
   const initialLimit = pool ? Number(pool.initialLimit || 0) : 0;
   const currentRemaining = pool ? Number(pool.remainingLimit || 0) : 0;
-  const recalculatedRemaining = Math.max(0, initialLimit - stat.totalETB);
+
+  // Recalculated remaining float: initialLimit - depositsToday + withdrawalsToday (capped at initialLimit)
+  const netDeduction = stat.totalETB - withdrawTotal;
+  const recalculatedRemaining = Math.min(initialLimit, Math.max(0, initialLimit - netDeduction));
 
   console.log(`\nAgent: ${agentKey}`);
-  console.log(`  - Total Verified CBE Deposits Today: ${stat.totalETB.toLocaleString()} ETB across ${stat.count} transaction(s)`);
+  console.log(`  - Total Verified Deposits Today:    ${stat.totalETB.toLocaleString()} ETB across ${stat.count} transaction(s)`);
+  for (const [bName, bAmt] of Object.entries(stat.byBank)) {
+    console.log(`      * ${bName.toUpperCase()}: ${bAmt.toLocaleString()} ETB`);
+  }
+  console.log(`  - Total Completed Withdrawals Today: ${withdrawTotal.toLocaleString()} ETB`);
   console.log(`  - Initial Configured Float:          ${initialLimit.toLocaleString()} ETB`);
   console.log(`  - Current Recorded Remaining Float:  ${currentRemaining.toLocaleString()} ETB`);
   console.log(`  - Target Calculated Remaining Float: ${recalculatedRemaining.toLocaleString()} ETB`);
@@ -167,9 +250,9 @@ for (const [agentKey, stat] of Object.entries(agentDepositTotals)) {
   if (difference > 0) {
     console.log(`  [OVER-FLOAT WARNING] Agent has ${difference.toLocaleString()} ETB more float than they should have!`);
   } else if (difference < 0) {
-    console.log(`  [INFO] Float is currently lower (additional withdrawals/deductions processed).`);
+    console.log(`  [INFO] Float is currently lower than net calculated.`);
   } else {
-    console.log(`  [IN SYNC] Recorded float matches today's CBE deposits exactly.`);
+    console.log(`  [IN SYNC] Recorded float matches today's activity exactly.`);
   }
 
   if (isApply && difference > 0) {
@@ -216,3 +299,4 @@ if (isApply) {
   console.log('  node backend/scripts/reconcileCbeLimits.js --apply');
 }
 console.log('='.repeat(70));
+
