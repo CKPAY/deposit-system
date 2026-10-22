@@ -168,49 +168,205 @@ function syncAgentSlots(data, agentUsername) {
   }
 }
 
+function normalizePhone(p) {
+  if (!p) return '';
+  let str = String(p).replace(/\D/g, '');
+  if (str.startsWith('251')) str = '0' + str.slice(3);
+  if (str.length === 9 && (str.startsWith('9') || str.startsWith('7'))) str = '0' + str;
+  return str;
+}
+
 /**
  * Deduct deposit amount from connected bank account or agent pool.
  * If account is connected to an agent, deducts from the agent's shared pool.
  */
-function deductBankDepositLimit(platform, bank, accountNumber, amount) {
+function deductBankDepositLimit(platform, bank, accountNumber, amount, fallbackAccount = null, assignedAgent = null) {
   const p = normalizePlatform(platform);
-  const b = String(bank || '').toLowerCase().trim();
-  const accNum = String(accountNumber || '').trim();
+  let b = String(bank || '').toLowerCase().trim();
+  if (b === 'siinqee' || b === 'sinqee') b = 'ebirr';
+  if (b === 'cbe_agent') b = 'cbeagent';
   const amt = Number(amount) || 0;
-  if (!accNum || amt <= 0) return null;
+  if (amt <= 0) return null;
 
   const fullData = readJSON('bank_accounts.json') || {};
   if (!fullData[p]) return null;
 
-  const cleanAcc = accNum.replace(/\D/g, '');
-  let slots = Array.isArray(fullData[p][b]) ? fullData[p][b] : [];
-  let slot = slots.find(a => {
-    const sAcc = String(a.account || a.phone || '').trim().toLowerCase();
-    if (sAcc === accNum.toLowerCase()) return true;
-    const sClean = sAcc.replace(/\D/g, '');
-    return cleanAcc.length >= 6 && (sClean.endsWith(cleanAcc) || cleanAcc.endsWith(sClean));
-  });
+  // Account matcher that handles exact matching, masked accounts (e.g. 1000****789), clean digit matching, and normalized phone matching
+  const matchSlotAccount = (slotAcc, targetAcc) => {
+    if (!slotAcc || !targetAcc) return false;
+    const sRaw = String(slotAcc).trim().toLowerCase();
+    const tRaw = String(targetAcc).trim().toLowerCase();
+    if (sRaw === tRaw) return true;
 
-  if (!slot && (b === 'cbeagent' || b === 'cbe_agent')) {
-    const cbeSlots = Array.isArray(fullData[p]['cbe']) ? fullData[p]['cbe'] : [];
-    slot = cbeSlots.find(a => {
-      const sAcc = String(a.account || '').trim().toLowerCase();
-      if (sAcc === accNum.toLowerCase()) return true;
-      const sClean = sAcc.replace(/\D/g, '');
-      return cleanAcc.length >= 6 && (sClean.endsWith(cleanAcc) || cleanAcc.endsWith(sClean));
-    });
+    // Check phone normalization first
+    const sNormPhone = normalizePhone(sRaw);
+    const tNormPhone = normalizePhone(tRaw);
+    if (sNormPhone && tNormPhone && sNormPhone === tNormPhone) return true;
+
+    const sClean = sRaw.replace(/\D/g, '');
+    const tClean = tRaw.replace(/\D/g, '');
+    if (!sClean || !tClean) return false;
+
+    // Handle masked patterns (e.g. "1000****789", "2519****2277", "09****2277")
+    if (tRaw.includes('*')) {
+      const parts = tRaw.split(/\*+/);
+      let prefix = parts[0] ? parts[0].replace(/\D/g, '') : '';
+      let suffix = parts[parts.length - 1] ? parts[parts.length - 1].replace(/\D/g, '') : '';
+
+      if (prefix.startsWith('2519') || prefix === '9' || prefix === '09') prefix = '09';
+      else if (prefix.startsWith('2517') || prefix === '7' || prefix === '07') prefix = '07';
+
+      const checkStr = sNormPhone || sClean;
+      if (prefix && !checkStr.startsWith(prefix)) return false;
+      if (suffix && !checkStr.endsWith(suffix)) return false;
+      return true;
+    }
+
+    if (sRaw.includes('*')) {
+      const parts = sRaw.split(/\*+/);
+      let prefix = parts[0] ? parts[0].replace(/\D/g, '') : '';
+      let suffix = parts[parts.length - 1] ? parts[parts.length - 1].replace(/\D/g, '') : '';
+
+      if (prefix.startsWith('2519') || prefix === '9' || prefix === '09') prefix = '09';
+      else if (prefix.startsWith('2517') || prefix === '7' || prefix === '07') prefix = '07';
+
+      const checkStr = tNormPhone || tClean;
+      if (prefix && !checkStr.startsWith(prefix)) return false;
+      if (suffix && !checkStr.endsWith(suffix)) return false;
+      return true;
+    }
+
+    if (sClean === tClean) return true;
+    if (sClean.length >= 6 && tClean.length >= 6) {
+      return sClean.endsWith(tClean) || tClean.endsWith(sClean);
+    }
+    return false;
+  };
+
+  const isCbeFamily = (b === 'cbe' || b === 'cbeagent');
+  const isEbirrFamily = (b === 'ebirr' || b === 'siinqee');
+  const isTelebirr = (b === 'telebirr');
+
+  // Collect candidate account identifiers
+  const targetAccs = [];
+  if (accountNumber && (/\d/.test(String(accountNumber)) || String(accountNumber).includes('*'))) {
+    targetAccs.push(String(accountNumber).trim());
+  }
+  if (fallbackAccount && (/\d/.test(String(fallbackAccount)) || String(fallbackAccount).includes('*'))) {
+    const cleanFb = String(fallbackAccount).trim();
+    if (!targetAccs.includes(cleanFb)) targetAccs.push(cleanFb);
   }
 
-  // Also check numbers.json for telebirr
-  if (!slot && b === 'telebirr') {
-    const numData = readJSON('numbers.json') || {};
-    const numSlots = (numData[p] && Array.isArray(numData[p].numbers)) ? numData[p].numbers : [];
-    slot = numSlots.find(n => {
-      const sPhone = String(n.phone || '').trim().toLowerCase();
-      if (sPhone === accNum.toLowerCase()) return true;
-      const sClean = sPhone.replace(/\D/g, '');
-      return cleanAcc.length >= 6 && (sClean.endsWith(cleanAcc) || cleanAcc.endsWith(sClean));
-    });
+  let slot = null;
+  let slotBank = b;
+
+  // Search by account number / phone
+  for (const target of targetAccs) {
+    if (isTelebirr) {
+      const numData = readJSON('numbers.json') || {};
+      const numSlots = (numData[p] && Array.isArray(numData[p].numbers)) ? numData[p].numbers : [];
+      slot = numSlots.find(n => matchSlotAccount(n.phone, target));
+      if (slot) break;
+    } else {
+      let slots = Array.isArray(fullData[p][b]) ? fullData[p][b] : [];
+      slot = slots.find(a => matchSlotAccount(a.account || a.phone, target));
+      if (slot) break;
+
+      if (isCbeFamily) {
+        const altBank = (b === 'cbe') ? 'cbeagent' : 'cbe';
+        const altSlots = Array.isArray(fullData[p][altBank]) ? fullData[p][altBank] : [];
+        slot = altSlots.find(a => matchSlotAccount(a.account || a.phone, target));
+        if (slot) {
+          slotBank = altBank;
+          break;
+        }
+      }
+
+      if (isEbirrFamily) {
+        const altBank = (b === 'ebirr') ? 'siinqee' : 'ebirr';
+        const altSlots = Array.isArray(fullData[p][altBank]) ? fullData[p][altBank] : [];
+        slot = altSlots.find(a => matchSlotAccount(a.account || a.phone, target));
+        if (slot) {
+          slotBank = altBank;
+          break;
+        }
+      }
+    }
+  }
+
+  // Fallback: match by assignedAgent if not found by account string
+  if (!slot && assignedAgent) {
+    const agKey = normalizeAgent(assignedAgent);
+    if (isTelebirr) {
+      const numData = readJSON('numbers.json') || {};
+      const numSlots = (numData[p] && Array.isArray(numData[p].numbers)) ? numData[p].numbers : [];
+      slot = numSlots.find(n => normalizeAgent(n.connectedAgent) === agKey);
+    } else {
+      let slots = Array.isArray(fullData[p][b]) ? fullData[p][b] : [];
+      slot = slots.find(a => normalizeAgent(a.connectedAgent) === agKey);
+      if (!slot && isCbeFamily) {
+        const altBank = (b === 'cbe') ? 'cbeagent' : 'cbe';
+        const altSlots = Array.isArray(fullData[p][altBank]) ? fullData[p][altBank] : [];
+        slot = altSlots.find(a => normalizeAgent(a.connectedAgent) === agKey);
+        if (slot) slotBank = altBank;
+      }
+      if (!slot && isEbirrFamily) {
+        const altBank = (b === 'ebirr') ? 'siinqee' : 'ebirr';
+        const altSlots = Array.isArray(fullData[p][altBank]) ? fullData[p][altBank] : [];
+        slot = altSlots.find(a => normalizeAgent(a.connectedAgent) === agKey);
+        if (slot) slotBank = altBank;
+      }
+    }
+  }
+
+  // Fallback: direct deduction from shared agent limit if assignedAgent exists in agentLimits
+  if (!slot && assignedAgent) {
+    const agKey = normalizeAgent(assignedAgent);
+    if (fullData.agentLimits && fullData.agentLimits[agKey]) {
+      const currentInit = Number(fullData.agentLimits[agKey].initialLimit) || 0;
+      const currentRem = (fullData.agentLimits[agKey].remainingLimit !== undefined && fullData.agentLimits[agKey].remainingLimit !== null)
+        ? Number(fullData.agentLimits[agKey].remainingLimit)
+        : currentInit;
+      const newRemaining = Math.max(0, Math.round((currentRem - amt) * 100) / 100);
+
+      fullData.agentLimits[agKey] = {
+        initialLimit: currentInit,
+        remainingLimit: newRemaining
+      };
+
+      for (const [pl, bMap] of Object.entries(fullData)) {
+        if (!bMap || typeof bMap !== 'object' || pl === 'agentLimits') continue;
+        for (const [bk, accs] of Object.entries(bMap)) {
+          if (!Array.isArray(accs)) continue;
+          accs.forEach(a => {
+            if (a && normalizeAgent(a.connectedAgent) === agKey) {
+              a.initialLimit = currentInit;
+              a.remainingLimit = newRemaining;
+            }
+          });
+        }
+      }
+      writeJSON('bank_accounts.json', fullData);
+
+      const numData = readJSON('numbers.json');
+      if (numData) {
+        let numChanged = false;
+        for (const [pl, pData] of Object.entries(numData)) {
+          if (!pData || !Array.isArray(pData.numbers)) continue;
+          pData.numbers.forEach(n => {
+            if (n && normalizeAgent(n.connectedAgent) === agKey) {
+              n.initialLimit = currentInit;
+              n.remainingLimit = newRemaining;
+              numChanged = true;
+            }
+          });
+        }
+        if (numChanged) writeJSON('numbers.json', numData);
+      }
+
+      console.log(`[Bank Limit] Deposit ${amt} ETB deducted directly from shared agent pool '${agKey}'. Prev: ${currentRem}, New Remaining: ${newRemaining}`);
+      return { agent: agKey, initialLimit: currentInit, remainingLimit: newRemaining };
+    }
   }
 
   if (!slot) return null;
@@ -272,28 +428,35 @@ function deductBankDepositLimit(platform, bank, accountNumber, amount) {
       }
     }
 
-    console.log(`[Bank Limit] Deposit ${amt} ETB deducted from shared agent pool '${agentKey}' (via ${p}/${b} ${accNum}). Prev: ${currentRem}, New Remaining: ${newRemaining}`);
+    console.log(`[Bank Limit] Deposit ${amt} ETB deducted from shared agent pool '${agentKey}' (via ${p}/${slotBank} ${slot.account || slot.phone}). Prev: ${currentRem}, New Remaining: ${newRemaining}`);
     return { ...slot, remainingLimit: newRemaining, initialLimit: currentInit };
   }
 
   // Case 2: Standalone account with its own limit (no agent)
-  if (slot.remainingLimit !== undefined && slot.remainingLimit !== null) {
-    const prev = Number(slot.remainingLimit);
-    slot.remainingLimit = Math.max(0, Math.round((prev - amt) * 100) / 100);
-    writeJSON('bank_accounts.json', fullData);
+  const hasLimit = (slot.remainingLimit !== undefined && slot.remainingLimit !== null) ||
+                   (slot.initialLimit !== undefined && slot.initialLimit !== null);
+  if (hasLimit) {
+    const prev = Number(slot.remainingLimit !== undefined && slot.remainingLimit !== null ? slot.remainingLimit : slot.initialLimit);
+    const init = (slot.initialLimit !== undefined && slot.initialLimit !== null) ? Number(slot.initialLimit) : prev;
+    const newRem = Math.max(0, Math.round((prev - amt) * 100) / 100);
+    slot.initialLimit = init;
+    slot.remainingLimit = newRem;
 
-    if (b === 'telebirr') {
+    if (isTelebirr) {
       const numData = readJSON('numbers.json') || {};
       if (numData[p] && Array.isArray(numData[p].numbers)) {
-        const found = numData[p].numbers.find(n => n.id === slot.id);
+        const found = numData[p].numbers.find(n => n.id === slot.id || n.phone === slot.phone);
         if (found) {
-          found.remainingLimit = slot.remainingLimit;
+          found.initialLimit = init;
+          found.remainingLimit = newRem;
           writeJSON('numbers.json', numData);
         }
       }
+    } else {
+      writeJSON('bank_accounts.json', fullData);
     }
 
-    console.log(`[Bank Limit] Deposit ${amt} ETB deducted from standalone ${p}/${b} account ${accNum}. Prev: ${prev}, New Remaining: ${slot.remainingLimit}`);
+    console.log(`[Bank Limit] Deposit ${amt} ETB deducted from standalone ${p}/${slotBank} account ${slot.account || slot.phone}. Prev: ${prev}, New Remaining: ${newRem}`);
     return slot;
   }
 
@@ -306,14 +469,16 @@ function deductBankDepositLimit(platform, bank, accountNumber, amount) {
  */
 function increaseBankWithdrawLimit(platform, bank, agentUsername, amount, specificAccount = null) {
   const p = normalizePlatform(platform);
-  const b = String(bank || '').toLowerCase().trim();
+  let b = String(bank || '').toLowerCase().trim();
+  if (b === 'siinqee' || b === 'sinqee') b = 'ebirr';
+  if (b === 'cbe_agent') b = 'cbeagent';
   const amt = Number(amount) || 0;
   if (amt <= 0) return null;
 
   const fullData = readJSON('bank_accounts.json') || {};
   const agentKey = normalizeAgent(agentUsername);
 
-  if (agentKey) {
+  if (agentKey && agentKey !== 'admin') {
     if (!fullData.agentLimits) fullData.agentLimits = {};
 
     let currentInit = 0;
@@ -323,7 +488,7 @@ function increaseBankWithdrawLimit(platform, bank, agentUsername, amount, specif
       currentInit = Number(fullData.agentLimits[agentKey].initialLimit) || 0;
       currentRem = Number(fullData.agentLimits[agentKey].remainingLimit) || 0;
     } else {
-      // Find from any connected slot
+      // Find from any connected slot in bank_accounts.json
       for (const [pl, bMap] of Object.entries(fullData)) {
         if (!bMap || typeof bMap !== 'object' || pl === 'agentLimits') continue;
         for (const [bk, accs] of Object.entries(bMap)) {
@@ -337,6 +502,20 @@ function increaseBankWithdrawLimit(platform, bank, agentUsername, amount, specif
         }
         if (currentInit > 0) break;
       }
+
+      // Also search numbers.json if not found in bank_accounts.json
+      if (currentInit === 0 && currentRem === 0) {
+        const numData = readJSON('numbers.json') || {};
+        for (const [pl, pData] of Object.entries(numData)) {
+          if (!pData || !Array.isArray(pData.numbers)) continue;
+          const found = pData.numbers.find(n => normalizeAgent(n.connectedAgent) === agentKey);
+          if (found) {
+            currentInit = Number(found.initialLimit) || 0;
+            currentRem = Number(found.remainingLimit !== undefined && found.remainingLimit !== null ? found.remainingLimit : found.initialLimit) || 0;
+            break;
+          }
+        }
+      }
     }
 
     if (currentInit > 0 || currentRem > 0) {
@@ -348,7 +527,7 @@ function increaseBankWithdrawLimit(platform, bank, agentUsername, amount, specif
         remainingLimit: newRemaining
       };
 
-      // Sync to ALL slots connected to this agent
+      // Sync to ALL slots connected to this agent in bank_accounts.json
       for (const [pl, bMap] of Object.entries(fullData)) {
         if (!bMap || typeof bMap !== 'object' || pl === 'agentLimits') continue;
         for (const [bk, accs] of Object.entries(bMap)) {
@@ -389,9 +568,28 @@ function increaseBankWithdrawLimit(platform, bank, agentUsername, amount, specif
   }
 
   // Fallback for specific account without agent
-  if (specificAccount && fullData[p] && Array.isArray(fullData[p][b])) {
-    const accNum = String(specificAccount).trim().toLowerCase();
-    const slot = fullData[p][b].find(a => String(a.account || '').trim().toLowerCase() === accNum);
+  if (specificAccount && b === 'telebirr') {
+    const numData = readJSON('numbers.json') || {};
+    if (numData[p] && Array.isArray(numData[p].numbers)) {
+      const sAcc = normalizePhone(specificAccount);
+      const slot = numData[p].numbers.find(n => normalizePhone(n.phone) === sAcc);
+      if (slot && (slot.remainingLimit !== undefined && slot.remainingLimit !== null)) {
+        const prev = Number(slot.remainingLimit);
+        const cap = (slot.initialLimit !== undefined && slot.initialLimit !== null) ? Number(slot.initialLimit) : (prev + amt);
+        slot.remainingLimit = Math.min(cap, Math.round((prev + amt) * 100) / 100);
+        writeJSON('numbers.json', numData);
+        return slot;
+      }
+    }
+  } else if (specificAccount && fullData[p]) {
+    const sClean = String(specificAccount).replace(/\D/g, '');
+    let slots = Array.isArray(fullData[p][b]) ? fullData[p][b] : [];
+    let slot = slots.find(a => String(a.account || '').replace(/\D/g, '') === sClean);
+    if (!slot && (b === 'cbe' || b === 'cbeagent')) {
+      const altBank = (b === 'cbe') ? 'cbeagent' : 'cbe';
+      const altSlots = Array.isArray(fullData[p][altBank]) ? fullData[p][altBank] : [];
+      slot = altSlots.find(a => String(a.account || '').replace(/\D/g, '') === sClean);
+    }
     if (slot && slot.remainingLimit !== undefined && slot.remainingLimit !== null) {
       const prev = Number(slot.remainingLimit);
       const cap = (slot.initialLimit !== undefined && slot.initialLimit !== null) ? Number(slot.initialLimit) : (prev + amt);
