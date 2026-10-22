@@ -271,8 +271,13 @@ function getPlatformBankAccounts(platform = 'jember', bank = 'cbe') {
 }
 
 function getActiveBankAccounts(platform = 'jember', bank = 'cbe') {
-  const list = getPlatformBankAccounts(platform, bank);
-  return list.filter(a => a.active !== false && a.account && a.account.trim()).map(a => a.account.trim());
+  let list = getPlatformBankAccounts(platform, bank);
+  let active = list.filter(a => a.active !== false && a.account && a.account.trim()).map(a => a.account.trim());
+  if ((bank === 'cbeagent' || bank === 'cbe_agent') && active.length === 0) {
+    list = getPlatformBankAccounts(platform, 'cbe');
+    active = list.filter(a => a.active !== false && a.account && a.account.trim()).map(a => a.account.trim());
+  }
+  return active;
 }
 
 function isBankEnabled(platform = 'jember', bank = 'cbe') {
@@ -572,7 +577,9 @@ router.get('/active-banks', (req, res) => {
   });
   const hasAnyConfiguredAccounts = SUPPORTED_7_BANKS.some(b => {
     let accs = Array.isArray(platData[b]) ? platData[b] : [];
-    if (b === 'cbeagent' && accs.length === 0) accs = Array.isArray(platData['cbe']) ? platData['cbe'] : [];
+    if (b === 'cbeagent' && !accs.some(a => a && a.active !== false && String(a.account || '').trim() !== '')) {
+      accs = Array.isArray(platData['cbe']) ? platData['cbe'] : [];
+    }
     return accs.some(a => a && a.active !== false && String(a.account || '').trim() !== '');
   });
 
@@ -598,7 +605,9 @@ router.get('/active-banks', (req, res) => {
     // - Accounts WITH a limit (connected or not): available only while remaining > 0.
     if (hasAnyConfiguredAccounts) {
       let accs = Array.isArray(platData[b]) ? platData[b] : [];
-      if (b === 'cbeagent' && accs.length === 0) accs = Array.isArray(platData['cbe']) ? platData['cbe'] : [];
+      if (b === 'cbeagent' && !accs.some(a => a && a.active !== false && String(a.account || '').trim() !== '')) {
+        accs = Array.isArray(platData['cbe']) ? platData['cbe'] : [];
+      }
       const hasAvailable = accs.some(a => {
         if (!a || a.active === false || String(a.account || '').trim() === '') return false;
         const hasLimit = (a.remainingLimit !== undefined && a.remainingLimit !== null) ||
@@ -758,10 +767,11 @@ router.post('/init', (req, res) => {
       return res.status(400).json({ error: `${bank.toUpperCase()} is currently disabled for ${settings.siteName}. Please choose another bank.` });
     }
     let bankAccounts = getPlatformBankAccounts(platform, bank);
-    if ((bank === 'cbeagent' || bank === 'cbe_agent') && bankAccounts.length === 0) {
+    let activeBankList = bankAccounts.filter(a => a.account && a.account.trim() && a.active !== false);
+    if ((bank === 'cbeagent' || bank === 'cbe_agent') && activeBankList.length === 0) {
       bankAccounts = getPlatformBankAccounts(platform, 'cbe');
+      activeBankList = bankAccounts.filter(a => a.account && a.account.trim() && a.active !== false);
     }
-    const activeBankList = bankAccounts.filter(a => a.account && a.account.trim() && a.active !== false);
     if (activeBankList.length === 0) {
       return res.status(500).json({ error: `No active ${bank.toUpperCase()} accounts configured for ${settings.siteName}` });
     }
