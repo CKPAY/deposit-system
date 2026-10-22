@@ -154,6 +154,7 @@ function getPlatformSettings(platform = 'jember') {
     return {
       ...raw.platforms[p],
       bankVerificationMethod: raw.platforms[p].bankVerificationMethod || 'copy_paste',
+      bankVerificationMethods: raw.platforms[p].bankVerificationMethods || {},
       adminUsers: raw.adminUsers || [],
       whitelistedIPs: raw.whitelistedIPs || []
     };
@@ -168,9 +169,22 @@ function getPlatformSettings(platform = 'jember') {
     verifyApiKey: raw.verifyApiKey || '',
     apiKeys: raw.apiKeys || ['', '', '', '', ''],
     bankVerificationMethod: 'copy_paste',
+    bankVerificationMethods: {},
     adminUsers: raw.adminUsers || [],
     whitelistedIPs: raw.whitelistedIPs || []
   };
+}
+
+function getBankVerificationMethod(platform = 'jember', bank = 'cbe') {
+  const settings = getPlatformSettings(platform);
+  let b = String(bank || '').toLowerCase().trim();
+  if (b === 'siinqee' || b === 'sinqee') b = 'ebirr';
+  if (b === 'cbe_agent') b = 'cbeagent';
+
+  if (settings.bankVerificationMethods && settings.bankVerificationMethods[b]) {
+    return settings.bankVerificationMethods[b];
+  }
+  return settings.bankVerificationMethod || 'copy_paste';
 }
 
 function getPlatformNumbers(platform = 'jember') {
@@ -640,7 +654,8 @@ router.get('/active-banks', (req, res) => {
     platform: p,
     activeBanks,
     status: enrichedStatus,
-    bankVerificationMethod: settings.bankVerificationMethod || 'copy_paste'
+    bankVerificationMethod: settings.bankVerificationMethod || 'copy_paste',
+    bankVerificationMethods: settings.bankVerificationMethods || {}
   });
 });
 
@@ -817,7 +832,7 @@ router.post('/init', (req, res) => {
         accountNumber: activeSession.accountNumber || activeSession.phoneNumber,
         amount: activeSession.amount,
         requestedAmount: activeSession.requestedAmount || activeSession.amount,
-        bankVerificationMethod: settings.bankVerificationMethod || 'copy_paste',
+        bankVerificationMethod: getBankVerificationMethod(platform, activeSession.bank || bank),
         expiresAt: activeSession.expiresAt,
         sessionExpiry: settings.sessionExpiry,
         currency: settings.currency,
@@ -867,7 +882,7 @@ router.post('/init', (req, res) => {
     accountNumber: newTxObj.accountNumber || newTxObj.phoneNumber,
     amount: amt,
     requestedAmount: amt,
-    bankVerificationMethod: settings.bankVerificationMethod || 'copy_paste',
+    bankVerificationMethod: getBankVerificationMethod(platform, bank),
     expiresAt,
     sessionExpiry: settings.sessionExpiry,
     currency: settings.currency,
@@ -1724,7 +1739,7 @@ router.get('/session/:sessionId', (req, res) => {
     accountNumber: tx.accountNumber || tx.phoneNumber || null,
     amount: tx.amount,
     requestedAmount: tx.requestedAmount || tx.amount,
-    bankVerificationMethod: settings.bankVerificationMethod || 'copy_paste',
+    bankVerificationMethod: getBankVerificationMethod(platform, tx.bank),
     expiresAt: tx.expiresAt,
     sessionExpiry: settings.sessionExpiry || 20,
     currency: settings.currency || 'ETB',
@@ -1752,7 +1767,7 @@ router.get('/status/:sessionId', (req, res) => {
     accountNumber: tx.accountNumber || tx.phoneNumber || null,
     verifiedAmount: tx.verifiedAmount || tx.amount,
     requestedAmount: tx.requestedAmount || tx.amount,
-    bankVerificationMethod: settings.bankVerificationMethod || 'copy_paste',
+    bankVerificationMethod: getBankVerificationMethod(platform, tx.bank),
     transactionId: tx.transactionId,
     failReason: tx.failReason || null,
     returnUrl: tx.returnUrl || null,
