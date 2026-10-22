@@ -1497,8 +1497,18 @@ router.post('/verify', (req, res) => {
 
           // Deduct from connected bank/telebirr account float limit
           if (updatedTx) {
-            const actualAccount = result.receipt?.creditedAccount || updatedTx.accountNumber || updatedTx.phoneNumber;
-            deductBankDepositLimit(updatedTx.platform, updatedTx.bank, actualAccount, parsedAmt);
+            const hasDigitsOrMask = (str) => str && (/\d/.test(String(str)) || String(str).includes('*'));
+            const actualAccount = (hasDigitsOrMask(result.receipt?.creditedAccount) ? result.receipt.creditedAccount : null)
+              || updatedTx.accountNumber
+              || updatedTx.phoneNumber;
+            deductBankDepositLimit(
+              updatedTx.platform,
+              updatedTx.bank,
+              actualAccount,
+              parsedAmt,
+              updatedTx.accountNumber || updatedTx.phoneNumber,
+              updatedTx.assignedAgent
+            );
           }
 
           // Webhook Callback with HMAC-SHA256 Signature Verification & Retries
@@ -1674,8 +1684,18 @@ router.post('/verify-screenshot', async (req, res) => {
 
           // Deduct from connected bank/telebirr account float limit
           if (updatedTx) {
-            const actualAccount = result.receipt?.creditedAccount || updatedTx.accountNumber || updatedTx.phoneNumber;
-            deductBankDepositLimit(updatedTx.platform, updatedTx.bank, actualAccount, parsedAmt);
+            const hasDigitsOrMask = (str) => str && (/\d/.test(String(str)) || String(str).includes('*'));
+            const actualAccount = (hasDigitsOrMask(result.receipt?.creditedAccount) ? result.receipt.creditedAccount : null)
+              || updatedTx.accountNumber
+              || updatedTx.phoneNumber;
+            deductBankDepositLimit(
+              updatedTx.platform,
+              updatedTx.bank,
+              actualAccount,
+              parsedAmt,
+              updatedTx.accountNumber || updatedTx.phoneNumber,
+              updatedTx.assignedAgent
+            );
           }
 
           // Webhook Callback with HMAC-SHA256 Signature Verification & Retries
