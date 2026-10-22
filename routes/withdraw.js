@@ -66,12 +66,13 @@ function normalizeBank(raw) {
   const s = String(raw).toLowerCase().trim();
   if (s.includes('telebirr') || s.includes('tele birr') || s === 'tele') return 'telebirr';
   if (s.includes('cbebirr') || s.includes('cbe birr') || s.includes('cbe-birr') || s.includes('cbe_birr')) return 'cbebirr';
+  if (s.includes('cbeagent') || s.includes('cbe agent') || s.includes('cbe-agent') || s.includes('cbe_agent')) return 'cbeagent';
   if (s.includes('cbe') || s.includes('commercial') || s.includes('ንግድ ባንክ')) return 'cbe';
   if (s.includes('boa') || s.includes('abyssinia') || s.includes('abisinia') || s.includes('አቢሲኒያ')) return 'boa';
   if (s.includes('awash') || s.includes('አዋሽ')) return 'awash';
   if (s.includes('dashen') || s.includes('ዳሸን')) return 'dashen';
   if (s.includes('mpesa') || s.includes('m-pesa') || s.includes('safaricom')) return 'mpesa';
-  if (s.includes('siinqee') || s.includes('sinqee') || s.includes('ሲንቄ')) return 'siinqee';
+  if (s.includes('siinqee') || s.includes('sinqee') || s.includes('ሲንቄ') || s.includes('ebirr') || s.includes('e-birr') || s.includes('e birr')) return 'ebirr';
   return s;
 }
 
@@ -84,6 +85,10 @@ function createWithdrawWebhookPayload(w, status, secret) {
   const rawSigString = `${w.id}:${orderId || ''}:${amount}:${status}:${timestamp}`;
   const signature = crypto.createHmac('sha256', secret).update(rawSigString).digest('hex');
 
+  const partnerBank = (w.originalBank && ['siinqee', 'sinqee'].some(x => w.originalBank.toLowerCase().includes(x)))
+    ? 'siinqee'
+    : (w.bank === 'ebirr' ? 'siinqee' : (w.bank || 'telebirr'));
+
   return {
     status, // 'completed' | 'rejected'
     sessionId: w.id,
@@ -91,7 +96,7 @@ function createWithdrawWebhookPayload(w, status, secret) {
     userId: w.userId,
     orderId: orderId,
     amount: amount,
-    bank: w.bank || 'telebirr',
+    bank: partnerBank,
     phoneNumber: w.phoneNumber,
     accountNumber: w.accountNumber || w.phoneNumber,
     accountHolderName: w.accountHolderName || null,
@@ -347,6 +352,7 @@ router.post(['/', '/init', '/request', '/create', '/payout'], (req, res) => {
 
   const finalReturnUrl = returnUrl || defaultReturnUrl;
 
+  const isSiinqeePartner = ['siinqee', 'sinqee'].some(function(x) { return String(rawBankCandidate).toLowerCase().includes(x); });
   const assignedAgent = getNextAssignedAgent(platform, bank);
   const sessionId = uuidv4();
   const newWithdrawal = {
@@ -356,6 +362,7 @@ router.post(['/', '/init', '/request', '/create', '/payout'], (req, res) => {
     amount: amount,
     phoneNumber: isMasked ? accountNum : (phone || accountNum),
     bank: bank,
+    originalBank: isSiinqeePartner ? 'siinqee' : bank,
     accountNumber: accountNum,
     accountHolderName: accountHolder,
     status: 'pending',
@@ -399,7 +406,7 @@ function getNextAssignedAgent(platform, bank = 'telebirr') {
   const b = String(bank || 'telebirr').toLowerCase();
   const settings = readJSON('settings.json') || {};
   const users = settings.adminUsers || [];
-  const allBanks = ['telebirr', 'cbe', 'boa', 'cbebirr', 'awash', 'dashen', 'mpesa', 'siinqee'];
+  const allBanks = ['telebirr', 'cbe', 'boa', 'cbebirr', 'awash', 'dashen', 'cbeagent', 'ebirr'];
 
   // Find all active agents who have access to this platform AND this bank
   const eligibleAgents = users.filter(u => {
@@ -491,7 +498,7 @@ function requireStaffAuth(req, res, next) {
     session.isAgent = roleInfo.isAgent;
     session.active = roleInfo.active !== false;
     session.platforms = roleInfo.platforms || ['jember', 'bravobirr', 'abay', 'walta'];
-    session.banks = roleInfo.banks || ['telebirr', 'cbe', 'boa', 'cbebirr', 'awash', 'dashen', 'mpesa', 'siinqee'];
+    session.banks = roleInfo.banks || ['telebirr', 'cbe', 'boa', 'cbebirr', 'awash', 'dashen', 'cbeagent', 'ebirr'];
   }
 
   req.adminSession = session;
@@ -500,7 +507,7 @@ function requireStaffAuth(req, res, next) {
 
 router.get('/agents', requireStaffAuth, (req, res) => {
   const settings = readJSON('settings.json') || {};
-  const allBanks = ['telebirr', 'cbe', 'boa', 'cbebirr', 'awash', 'dashen', 'mpesa', 'siinqee'];
+  const allBanks = ['telebirr', 'cbe', 'boa', 'cbebirr', 'awash', 'dashen', 'cbeagent', 'ebirr'];
   const users = (settings.adminUsers || []).filter(
     u => u.username.trim().toLowerCase() !== 'master_root'
   );
@@ -552,7 +559,7 @@ router.get('/list', requireStaffAuth, (req, res) => {
     // And only for banks assigned to this agent
     const allowedBanks = (Array.isArray(session.banks) && session.banks.length > 0)
       ? session.banks.map(b => String(b).toLowerCase())
-      : ['telebirr', 'cbe', 'boa', 'cbebirr', 'awash', 'dashen', 'mpesa', 'siinqee'];
+      : ['telebirr', 'cbe', 'boa', 'cbebirr', 'awash', 'dashen', 'cbeagent', 'ebirr'];
 
     if (!bank || bank === 'all') {
       filters.banks = allowedBanks;
@@ -616,7 +623,7 @@ router.get('/stats', requireStaffAuth, (req, res) => {
 
     const allowedBanks = (Array.isArray(session.banks) && session.banks.length > 0)
       ? session.banks.map(b => String(b).toLowerCase())
-      : ['telebirr', 'cbe', 'boa', 'cbebirr', 'awash', 'dashen', 'mpesa', 'siinqee'];
+      : ['telebirr', 'cbe', 'boa', 'cbebirr', 'awash', 'dashen', 'cbeagent', 'ebirr'];
 
     options.banks = allowedBanks;
   } else {
