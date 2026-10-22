@@ -735,7 +735,8 @@ router.post('/approve', requireStaffAuth, (req, res) => {
   // For connected-agent accounts: withdrawals replenish the remaining float (so the agent can keep receiving deposits).
   // For non-connected accounts with a limit: remaining does NOT increase (strict one-time quota).
   try {
-    increaseBankWithdrawLimit(updated.platform, updated.bank, agentUsername, updated.amount, updated.accountNumber);
+    const effectiveAgent = (w && w.assignedAgent) ? w.assignedAgent : agentUsername;
+    increaseBankWithdrawLimit(updated.platform, updated.bank, effectiveAgent, updated.amount, updated.accountNumber);
   } catch (err) {
     console.error('[Bank Limit] Error increasing withdraw limit:', err.message);
   }
