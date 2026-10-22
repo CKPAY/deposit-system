@@ -573,6 +573,27 @@ router.get('/list', requireStaffAuth, (req, res) => {
     // Admin / SuperAdmin can filter by specific agent
     if (agent && agent !== 'all') {
       filters.assignedAgent = agent;
+      const settings = readJSON('settings.json') || {};
+      const targetAgentUser = (settings.adminUsers || []).find(
+        u => u.username && u.username.toLowerCase() === agent.toLowerCase()
+      );
+      if (targetAgentUser) {
+        const allowedPlatforms = (Array.isArray(targetAgentUser.platforms) && targetAgentUser.platforms.length > 0)
+          ? targetAgentUser.platforms.map(p => String(p).toLowerCase())
+          : null;
+        if (allowedPlatforms && (!platform || platform === 'all')) {
+          filters.platforms = allowedPlatforms;
+          delete filters.platform;
+        }
+
+        const allowedBanks = (Array.isArray(targetAgentUser.banks) && targetAgentUser.banks.length > 0)
+          ? targetAgentUser.banks.map(b => String(b).toLowerCase())
+          : null;
+        if (allowedBanks && (!bank || bank === 'all')) {
+          filters.banks = allowedBanks;
+          delete filters.bank;
+        }
+      }
     }
   }
 
@@ -630,6 +651,25 @@ router.get('/stats', requireStaffAuth, (req, res) => {
     // Admin filtering by agent:
     if (agent && agent !== 'all') {
       options.assignedAgent = agent;
+      const settings = readJSON('settings.json') || {};
+      const targetAgentUser = (settings.adminUsers || []).find(
+        u => u.username && u.username.toLowerCase() === agent.toLowerCase()
+      );
+      if (targetAgentUser) {
+        const allowedPlatforms = (Array.isArray(targetAgentUser.platforms) && targetAgentUser.platforms.length > 0)
+          ? targetAgentUser.platforms.map(p => String(p).toLowerCase())
+          : null;
+        if (allowedPlatforms && (!platform || platform === 'all')) {
+          options.platforms = allowedPlatforms;
+        }
+
+        const allowedBanks = (Array.isArray(targetAgentUser.banks) && targetAgentUser.banks.length > 0)
+          ? targetAgentUser.banks.map(b => String(b).toLowerCase())
+          : null;
+        if (allowedBanks && (!bank || bank === 'all')) {
+          options.banks = allowedBanks;
+        }
+      }
     }
   }
 
@@ -805,7 +845,7 @@ router.get('/agent-deposit-stats', requireStaffAuth, (req, res) => {
   ];
 
   if (usernameForQuery) {
-    whereClause = `(assignedAgent = ? OR accountNumber IN (${placeholders}))`;
+    whereClause = `(LOWER(assignedAgent) = LOWER(?) OR accountNumber IN (${placeholders}))`;
     params.push(usernameForQuery, ...accountNumbers);
   } else {
     whereClause = `(accountNumber IN (${placeholders}))`;
