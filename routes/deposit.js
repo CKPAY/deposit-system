@@ -31,6 +31,10 @@ function createWebhookPayload(tx, status, verifiedAmt = 0, receiptData = {}, err
   const rawSigString = `${tx.id}:${orderId || ''}:${verifiedAmount}:${status}:${timestamp}`;
   const signature = crypto.createHmac('sha256', secret).update(rawSigString).digest('hex');
 
+  const partnerBank = (tx.originalBank && tx.originalBank.toLowerCase().includes('siinqee'))
+    ? 'siinqee'
+    : (tx.bank === 'ebirr' && tx.originalBank ? 'siinqee' : (tx.bank || 'telebirr'));
+
   return {
     status,
     sessionId: tx.id,
@@ -39,7 +43,7 @@ function createWebhookPayload(tx, status, verifiedAmt = 0, receiptData = {}, err
     requestedAmount: tx.requestedAmount || tx.amount || 0,
     verifiedAmount: verifiedAmount,
     amount: verifiedAmount,
-    bank: tx.bank || 'telebirr',
+    bank: partnerBank,
     transactionId: tx.transactionId || null,
     phoneNumber: tx.phoneNumber || null,
     accountNumber: tx.accountNumber || tx.phoneNumber || null,
@@ -172,18 +176,38 @@ function getPlatformSettings(platform = 'jember') {
 function getPlatformNumbers(platform = 'jember') {
   const p = normalizePlatform(platform);
   const raw = readJSON('numbers.json') || {};
+  let list = [];
   if (raw[p] && Array.isArray(raw[p].numbers)) {
-    return raw[p].numbers;
+    list = raw[p].numbers;
+  } else if (Array.isArray(raw.numbers) && p === 'jember') {
+    list = raw.numbers;
+  } else {
+    list = Array.from({ length: 20 }, (_, i) => ({
+      id: i + 1,
+      phone: '',
+      label: `Account ${i + 1}`,
+      activeUsers: 0
+    }));
   }
-  if (Array.isArray(raw.numbers) && p === 'jember') {
-    return raw.numbers;
+
+  // Ensure slots connected to agents reflect live shared agent limit
+  const bankData = readJSON('bank_accounts.json') || {};
+  if (bankData.agentLimits) {
+    list.forEach(slot => {
+      if (slot && slot.connectedAgent) {
+        const agKey = String(slot.connectedAgent).trim().toLowerCase();
+        if (bankData.agentLimits[agKey]) {
+          const lim = bankData.agentLimits[agKey];
+          slot.initialLimit = Number(lim.initialLimit) || 0;
+          slot.remainingLimit = (lim.remainingLimit !== undefined && lim.remainingLimit !== null)
+            ? Number(lim.remainingLimit)
+            : Number(lim.initialLimit) || 0;
+        }
+      }
+    });
   }
-  return Array.from({ length: 20 }, (_, i) => ({
-    id: i + 1,
-    phone: '',
-    label: `Account ${i + 1}`,
-    activeUsers: 0
-  }));
+
+  return list;
 }
 
 function getActivePhoneNumbers(platform = 'jember') {
@@ -234,10 +258,14 @@ function matchesMaskedPhone(creditedStr, activePhones) {
 
 function getPlatformBankAccounts(platform = 'jember', bank = 'cbe') {
   const p = normalizePlatform(platform);
-  const b = String(bank || 'cbe').toLowerCase();
+  let b = String(bank || 'cbe').toLowerCase();
+  if (b === 'siinqee' || b === 'sinqee') b = 'ebirr';
   const raw = readJSON('bank_accounts.json') || {};
   if (raw[p] && Array.isArray(raw[p][b])) {
     return raw[p][b];
+  }
+  if (b === 'ebirr' && raw[p] && Array.isArray(raw[p]['siinqee'])) {
+    return raw[p]['siinqee'];
   }
   return [];
 }
@@ -249,16 +277,24 @@ function getActiveBankAccounts(platform = 'jember', bank = 'cbe') {
 
 function isBankEnabled(platform = 'jember', bank = 'cbe') {
   const p = normalizePlatform(platform);
-  const b = String(bank || 'cbe').toLowerCase();
+  let b = String(bank || 'cbe').toLowerCase();
+  if (b === 'siinqee' || b === 'sinqee') b = 'ebirr';
   const raw = readJSON('bank_accounts.json') || {};
   const platData = raw[p] || {};
   const status = platData.bankStatus || {};
-  if (status[b] === false) {
+  if (status[b] === false || (b === 'ebirr' && status['siinqee'] === false)) {
     return false;
   }
-  const SUPPORTED_7_BANKS = ['cbe', 'boa', 'cbebirr', 'awash', 'dashen', 'mpesa', 'siinqee'];
+  if ((b === 'cbeagent' || b === 'cbe_agent') && status[b] === undefined) {
+    if (status['cbeagent'] !== undefined) return status['cbeagent'] !== false;
+    if (status['mpesa'] !== undefined) return status['mpesa'] !== false;
+    if (status['cbe'] !== undefined) return status['cbe'] !== false;
+  }
+  const SUPPORTED_7_BANKS = ['cbe', 'boa', 'cbebirr', 'awash', 'dashen', 'cbeagent', 'ebirr'];
   const hasAnyExplicitTrue = SUPPORTED_7_BANKS.some(bk => status[bk] === true);
-  if (hasAnyExplicitTrue && status[b] !== true) {
+  if (hasAnyExplicitTrue) {
+    if (status[b] === true || (b === 'ebirr' && status['siinqee'] === true)) return true;
+    if ((b === 'cbeagent' || b === 'cbe_agent') && (status['mpesa'] === true || status['cbe'] === true)) return true;
     return false;
   }
   return true;
@@ -298,8 +334,11 @@ function extractTransactionId(text) {
     if (directQueryMatch && directQueryMatch[1]) return directQueryMatch[1].trim().toUpperCase();
 
     // If it is a CBE / Bank receipt URL pasted directly (ignore words like aureceipt, receipt, invoice)
-    const directUrlMatch = str.match(/https?:\/\/(?:[a-zA-Z0-9-]+\.)*(?:cbe\.com\.et|telebirr\.et|boa\.et|awashbank\.com|dashenbank\.com)[^\s]*\/(?!aureceipt|receipt|invoice|feedback)([A-Za-z0-9_-]{8,50})/i);
+    const directUrlMatch = str.match(/https?:\/\/(?:[a-zA-Z0-9-]+\.)*(?:cbe\.com\.et|telebirr\.et|boa\.et|awashbank\.com|dashenbank\.com|ebirr\.com)[^\s]*\/(?!aureceipt|receipt|invoice|feedback)([A-Za-z0-9_-]{8,50})/i);
     if (directUrlMatch && directUrlMatch[1]) return directUrlMatch[1].trim();
+
+    const directEbirrMatch = str.match(/https?:\/\/(?:[a-zA-Z0-9-]+\.)*ebirr\.com\/[^\s]*\/([A-Za-z0-9_-]{8,50})/i);
+    if (directEbirrMatch && directEbirrMatch[1]) return directEbirrMatch[1].trim();
 
     // Direct v2- or receipt hash code (e.g. v2-hfHCxFSmqtLtX7liH8Qm)
     if (/^v2-[A-Za-z0-9_-]{8,40}$/i.test(str)) return str;
@@ -308,6 +347,12 @@ function extractTransactionId(text) {
     if (/^[A-Za-z0-9_-]{8,35}$/.test(str)) {
       return str.startsWith('v2-') ? str : str.toUpperCase();
     }
+  }
+
+  // 1b. Direct eBirr Receipt Link in full text (e.g. receipt.ebirr.com/kaafimf/AmCD20Etm1dNXaDB3_LG4A)
+  const matchEbirrUrl = str.match(/https?:\/\/(?:[a-zA-Z0-9-]+\.)*ebirr\.com\/[^\s]*\/([A-Za-z0-9_-]{8,50})/i);
+  if (matchEbirrUrl && matchEbirrUrl[1]) {
+    return matchEbirrUrl[1].trim();
   }
 
   // 2. Multilingual keywords for Ethiopian Languages & English (Txn ID, Transaction ID, Ref, etc.)
@@ -512,28 +557,33 @@ router.get('/active-banks', (req, res) => {
   const platData = raw[p] || {};
   const status = platData.bankStatus || {};
 
-  const SUPPORTED_7_BANKS = ['cbe', 'boa', 'cbebirr', 'awash', 'dashen', 'mpesa', 'siinqee'];
+  const SUPPORTED_7_BANKS = ['cbe', 'boa', 'cbebirr', 'awash', 'dashen', 'cbeagent', 'ebirr'];
 
-  const hasAnyExplicitTrue = SUPPORTED_7_BANKS.some(b => status[b] === true);
+  const hasAnyExplicitTrue = SUPPORTED_7_BANKS.some(b => status[b] === true || (b === 'cbeagent' && (status['mpesa'] === true || status['cbe'] === true)));
   const hasAnyConfiguredAccounts = SUPPORTED_7_BANKS.some(b => {
-    const accs = Array.isArray(platData[b]) ? platData[b] : [];
+    let accs = Array.isArray(platData[b]) ? platData[b] : [];
+    if (b === 'cbeagent' && accs.length === 0) accs = Array.isArray(platData['cbe']) ? platData['cbe'] : [];
     return accs.some(a => a && a.active !== false && String(a.account || '').trim() !== '');
   });
 
   const activeBanks = SUPPORTED_7_BANKS.filter(b => {
     // If explicitly disabled in admin bankStatus, exclude
     if (status[b] === false) return false;
+    if (b === 'cbeagent' && status['cbeagent'] === undefined) {
+      if (status['mpesa'] === false || status['cbe'] === false) return false;
+    }
 
     // If admin explicitly set some bank(s) to true, ONLY include banks where status[b] === true
     if (hasAnyExplicitTrue) {
-      if (status[b] !== true) return false;
+      if (status[b] !== true && !(b === 'cbeagent' && (status['mpesa'] === true || status['cbe'] === true))) return false;
     }
 
     // If admin has configured accounts for any banks, only include banks that have at least one available account:
     // - Accounts with NO limit set: always available.
     // - Accounts WITH a limit (connected or not): available only while remaining > 0.
     if (hasAnyConfiguredAccounts) {
-      const accs = Array.isArray(platData[b]) ? platData[b] : [];
+      let accs = Array.isArray(platData[b]) ? platData[b] : [];
+      if (b === 'cbeagent' && accs.length === 0) accs = Array.isArray(platData['cbe']) ? platData['cbe'] : [];
       const hasAvailable = accs.some(a => {
         if (!a || a.active === false || String(a.account || '').trim() === '') return false;
         const hasLimit = (a.remainingLimit !== undefined && a.remainingLimit !== null) ||
@@ -551,25 +601,23 @@ router.get('/active-banks', (req, res) => {
 
   const settings = getPlatformSettings(p);
 
+  const enrichedStatus = { ...status };
+  if (enrichedStatus.cbeagent === undefined) {
+    enrichedStatus.cbeagent = enrichedStatus.mpesa !== undefined ? enrichedStatus.mpesa : (enrichedStatus.cbe !== undefined ? enrichedStatus.cbe : true);
+  }
+
   res.json({
     platform: p,
     activeBanks,
-    status,
+    status: enrichedStatus,
     bankVerificationMethod: settings.bankVerificationMethod || 'copy_paste'
   });
 });
 
-router.post(['/', '/init', '/create', '/request', '/invoice'], (req, res) => {
+router.post('/init', (req, res) => {
   let tokenPayload = {};
   let detectedPlatformFromToken = null;
   const rawToken = req.body.token || req.headers['x-ckpay-token'] || null;
-  console.log('[Deposit Init] incoming request:', {
-    platform: req.body?.platform,
-    bank: req.body?.bank,
-    amount: req.body?.amount,
-    userId: req.body?.userId || req.body?.account_id,
-    hasToken: !!rawToken
-  });
 
   if (rawToken) {
     // Check against each platform secret (jember, bravobirr, abay, walta)
@@ -613,7 +661,9 @@ router.post(['/', '/init', '/create', '/request', '/invoice'], (req, res) => {
   }
 
   const explicitBank = req.body.bank || tokenPayload.bank || req.query.bank || 'telebirr';
-  const bank = String(explicitBank).toLowerCase();
+  const rawBankCandidate = String(explicitBank).toLowerCase();
+  const isSiinqeePartner = ['siinqee', 'sinqee'].some(function(x) { return rawBankCandidate.includes(x); });
+  const bank = isSiinqeePartner ? 'ebirr' : rawBankCandidate;
 
   let assignedPhone = '';
   let assignedAccount = '';
@@ -624,6 +674,23 @@ router.post(['/', '/init', '/create', '/request', '/invoice'], (req, res) => {
     const activeNumberList = numbers.filter(n => n.phone && n.phone.trim() && n.active !== false);
     if (activeNumberList.length === 0) {
       return res.status(500).json({ error: `No active phone numbers configured for ${settings.siteName}` });
+    }
+
+    // Candidate Accounts: filter by available limit quota
+    const candidateNumberList = activeNumberList.filter(n => {
+      const hasLimit = (n.remainingLimit !== undefined && n.remainingLimit !== null) ||
+                       (n.initialLimit !== undefined && n.initialLimit !== null);
+      if (!hasLimit) {
+        return true; // No limit set -> always available
+      }
+      const remaining = Number(n.remainingLimit !== undefined && n.remainingLimit !== null ? n.remainingLimit : (n.initialLimit || 0));
+      return remaining >= amt; // Has a limit -> stop when it runs out
+    });
+
+    if (candidateNumberList.length === 0) {
+      return res.status(400).json({
+        error: `Deposit limit reached for Telebirr accounts (Requested ${amt} ETB exceeds available limit). Please try a smaller amount or choose another bank.`
+      });
     }
 
     let assignmentsData = readJSON('assignments.json') || {};
@@ -638,13 +705,16 @@ router.post(['/', '/init', '/create', '/request', '/invoice'], (req, res) => {
       history.push(userRecord.phone);
     }
 
-    if (history.length >= activeNumberList.length) {
+    if (history.length >= candidateNumberList.length) {
       const lastPhone = history[history.length - 1];
       history = lastPhone ? [lastPhone] : [];
     }
 
-    assignedPhone = pickPhoneNumber(activeNumberList, activeAssignments, history);
+    assignedPhone = pickPhoneNumber(candidateNumberList, activeAssignments, history);
     history.push(assignedPhone);
+
+    const chosenSlot = candidateNumberList.find(n => normalizePhone(n.phone) === normalizePhone(assignedPhone)) || candidateNumberList[0];
+    assignedAgent = chosenSlot ? (chosenSlot.connectedAgent || null) : null;
 
     assignmentsData[userKey] = {
       phone: assignedPhone,
@@ -666,7 +736,10 @@ router.post(['/', '/init', '/create', '/request', '/invoice'], (req, res) => {
     if (!isBankEnabled(platform, bank)) {
       return res.status(400).json({ error: `${bank.toUpperCase()} is currently disabled for ${settings.siteName}. Please choose another bank.` });
     }
-    const bankAccounts = getPlatformBankAccounts(platform, bank);
+    let bankAccounts = getPlatformBankAccounts(platform, bank);
+    if ((bank === 'cbeagent' || bank === 'cbe_agent') && bankAccounts.length === 0) {
+      bankAccounts = getPlatformBankAccounts(platform, 'cbe');
+    }
     const activeBankList = bankAccounts.filter(a => a.account && a.account.trim() && a.active !== false);
     if (activeBankList.length === 0) {
       return res.status(500).json({ error: `No active ${bank.toUpperCase()} accounts configured for ${settings.siteName}` });
@@ -738,11 +811,12 @@ router.post(['/', '/init', '/create', '/request', '/invoice'], (req, res) => {
     userId: String(userId),
     platform: platform,
     bank: bank,
+    originalBank: isSiinqeePartner ? 'siinqee' : bank,
     requestedAmount: amt,
     amount: amt,
     phoneNumber: bank === 'telebirr' ? assignedPhone : assignedAccount,
     accountNumber: bank === 'telebirr' ? null : assignedAccount,
-    assignedAgent: bank === 'telebirr' ? null : assignedAgent,
+    assignedAgent: assignedAgent || null,
     status: 'pending',
     createdAt: now,
     expiresAt,
@@ -756,7 +830,7 @@ router.post(['/', '/init', '/create', '/request', '/invoice'], (req, res) => {
   res.json({
     sessionId,
     platform,
-    bank,
+    bank: isSiinqeePartner ? 'siinqee' : bank,
     orderId: orderId || null,
     phoneNumber: newTxObj.phoneNumber,
     accountNumber: newTxObj.accountNumber || newTxObj.phoneNumber,
@@ -841,13 +915,70 @@ async function pollVerifyEtStatus(apiKey, requestId) {
   };
 }
 
+async function verifyEbirrReceiptFromUrl(receiptUrlOrToken, platform = 'jember') {
+  try {
+    let fullUrl = String(receiptUrlOrToken || '').trim();
+    if (!fullUrl.startsWith('http')) {
+      fullUrl = `https://receipt.ebirr.com/kaafimf/${fullUrl}`;
+    }
+    const res = await fetch(fullUrl, {
+      signal: AbortSignal.timeout(8000),
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
+    });
+    if (!res.ok) return null;
+    const html = await res.text();
+
+    const receiptNo = (html.match(/RECEIPT\s*NO:<\/td>\s*<td[^>]*>\s*([A-Za-z0-9_-]+)/i) || html.match(/Receipt\s*No\.?[^0-9]*([0-9]{8,20})/i) || [])[1];
+    const amtMatch = (html.match(/AMOUNT:<\/td>[\s\S]*?<strong>\s*([0-9.]+)\s*<\/strong>/i) || html.match(/Settled\s*Amount[^0-9]*([0-9.]+)/i) || [])[1];
+    const receiverPhone = (html.match(/Receiver Account\/Mobile[\s\S]*?<td[^>]*>\s*([0-9]+)/i) || html.match(/Receiver\s*(?:Account\/Mobile)?[^0-9]*([0-9]{9,13})/i) || [])[1];
+    const receiverName = (html.match(/Receiver name[\s\S]*?<td[^>]*>\s*([^<]+)/i) || [])[1]?.trim();
+    const senderName = (html.match(/Sender Name[\s\S]*?<td[^>]*>\s*([^<]+)/i) || [])[1]?.trim();
+    const dateMatch = (html.match(/DATE:<\/td>\s*<td[^>]*>\s*([^<]+)/i) || [])[1]?.trim();
+
+    if (receiptNo && amtMatch) {
+      const parsedAmt = parseFloat(amtMatch);
+      const activeAccounts = getActiveBankAccounts(platform, 'ebirr');
+      const cleanReceiver = (receiverPhone || '').replace(/\D/g, '');
+      const isMatch = activeAccounts.length === 0 || activeAccounts.some(acc => {
+        const cleanAcc = acc.replace(/\D/g, '');
+        return cleanAcc.endsWith(cleanReceiver.slice(-9)) || cleanReceiver.endsWith(cleanAcc.slice(-9));
+      });
+
+      if (!isMatch && activeAccounts.length > 0) {
+        return {
+          success: false,
+          message: 'Receipt receiver account does not match any active eBirr accounts.'
+        };
+      }
+
+      return {
+        success: true,
+        settlementMatch: true,
+        receipt: {
+          transactionId: receiptNo,
+          receiptNumber: receiptNo,
+          amount: parsedAmt,
+          creditedAccount: receiverPhone || '',
+          payer: senderName || '',
+          senderName: senderName || '',
+          receiver: receiverName || receiverPhone || '',
+          date: dateMatch || new Date().toISOString()
+        }
+      };
+    }
+  } catch (err) {
+    console.warn('[eBirr Receipt Scraper] Error fetching:', err.message);
+  }
+  return null;
+}
+
 async function verifyWithVerifyEt(apiKey, transactionId, bank = 'telebirr', receivingAccount = '') {
   try {
     const b = String(bank || 'telebirr').toLowerCase();
     const cleanTx = String(transactionId).trim();
 
     let requestBody = {};
-    if (b === 'cbe') {
+    if (b === 'cbe' || b === 'cbeagent' || b === 'cbe_agent') {
       const suffix = (receivingAccount || '').replace(/\D/g, '').slice(-8);
       requestBody = {
         bank: 'cbe',
@@ -876,9 +1007,15 @@ async function verifyWithVerifyEt(apiKey, transactionId, bank = 'telebirr', rece
         transactionNumber: cleanTx,
         settlementAccount: receivingAccount || undefined,
       };
-    } else if (b === 'awash' || b === 'dashen' || b === 'siinqee') {
+    } else if (b === 'awash' || b === 'dashen') {
       requestBody = {
         bank: b,
+        referenceNumber: cleanTx,
+        settlementAccount: receivingAccount || undefined,
+      };
+    } else if (b === 'ebirr' || b === 'siinqee') {
+      requestBody = {
+        bank: 'siinqee',
         referenceNumber: cleanTx,
         settlementAccount: receivingAccount || undefined,
       };
@@ -978,40 +1115,54 @@ async function verifyWithVerifyEtMultiKey(settings, transactionId, targetPhoneNu
     keysToTry.push(settings.verifyApiKey.trim());
   }
 
+  const isCbeFamily = (b === 'cbe' || b === 'cbeagent' || b === 'cbe_agent');
+  let candidateAccounts = [receivingAccount].filter(Boolean);
+  if (isCbeFamily) {
+    const activeCbe = getActiveBankAccounts(platform, 'cbe');
+    const activeAgent = getActiveBankAccounts(platform, 'cbeagent');
+    candidateAccounts = Array.from(new Set([...candidateAccounts, ...activeAgent, ...activeCbe].filter(Boolean)));
+  }
+
   let lastResult = null;
 
   for (const key of keysToTry) {
     if (!key || key.includes('_placeholder')) continue;
 
-    console.log(`[Verify] Trying key on Verify.ET for tx (${b}):`, transactionId);
-    const result = await verifyWithVerifyEt(key, transactionId, b, receivingAccount);
-    console.log('[Verify] Result from verifyWithVerifyEt:', result.success, result.message, result.receipt?.creditedAccount);
+    const accountsToTest = (isCbeFamily && candidateAccounts.length > 0) ? candidateAccounts : [receivingAccount];
 
-    if (result.success && result.receipt) {
-      if (b === 'telebirr') {
-        const credited = result.receipt.creditedAccount || result.receipt.receiver;
-        const isMatch = matchesMaskedPhone(credited, activePhones);
-        console.log('[Verify] Masked phone match:', credited, 'against activePhones:', isMatch);
-        if (isMatch) {
-          return result;
-        }
-      } else {
-        if (result.settlementMatch === true) {
-          return result;
-        }
-        const credited = result.receipt.creditedAccount || result.receipt.receiver;
-        const activeAccounts = getActiveBankAccounts(platform, b);
-        if (activeAccounts.length === 0 || !credited) {
-          return result;
-        }
-        const isMatch = matchesMaskedAccount(credited, activeAccounts);
-        console.log(`[Verify] Bank (${b}) account match:`, credited, isMatch);
-        if (isMatch) {
-          return result;
+    for (const testAcc of accountsToTest) {
+      console.log(`[Verify] Trying key on Verify.ET for tx (${b}), acc (${testAcc}):`, transactionId);
+      const result = await verifyWithVerifyEt(key, transactionId, b, testAcc);
+      console.log('[Verify] Result from verifyWithVerifyEt:', result.success, result.message, result.receipt?.creditedAccount);
+
+      if (result.success && result.receipt) {
+        if (b === 'telebirr') {
+          const credited = result.receipt.creditedAccount || result.receipt.receiver;
+          const isMatch = matchesMaskedPhone(credited, activePhones);
+          console.log('[Verify] Masked phone match:', credited, 'against activePhones:', isMatch);
+          if (isMatch) {
+            return result;
+          }
+        } else {
+          if (result.settlementMatch === true) {
+            return result;
+          }
+          const credited = result.receipt.creditedAccount || result.receipt.receiver;
+          const activeAccounts = isCbeFamily
+            ? candidateAccounts
+            : getActiveBankAccounts(platform, b);
+          if (activeAccounts.length === 0 || !credited) {
+            return result;
+          }
+          const isMatch = matchesMaskedAccount(credited, activeAccounts);
+          console.log(`[Verify] Bank (${b}) account match:`, credited, isMatch);
+          if (isMatch) {
+            return result;
+          }
         }
       }
+      lastResult = result;
     }
-    lastResult = result;
   }
 
   if (lastResult && lastResult.message && /credit|balance|insufficient/i.test(lastResult.message)) {
@@ -1035,8 +1186,10 @@ async function verifyWithVerifyEtScreenshot(apiKey, imageBuffer, mimeType, bank,
     const form = new FormData();
     const ext = mimeType.includes('png') ? 'png' : mimeType.includes('webp') ? 'webp' : 'jpg';
     form.append('image', new Blob([imageBuffer], { type: mimeType }), `receipt_${sessionId}.${ext}`);
-    if (bank && bank !== 'telebirr') {
-      form.append('bank', String(bank).toLowerCase());
+    let verifyBank = (bank === 'cbeagent' || bank === 'cbe_agent') ? 'cbe' : bank;
+    if (verifyBank === 'ebirr') verifyBank = 'siinqee';
+    if (verifyBank && verifyBank !== 'telebirr') {
+      form.append('bank', String(verifyBank).toLowerCase());
     }
     if (receivingAccount) {
       form.append('settlementAccount', String(receivingAccount).trim());
@@ -1141,13 +1294,26 @@ async function verifyWithVerifyEtScreenshotMultiKey(settings, imageBuffer, mimeT
   }
 
   let lastResult = null;
+  const isCbeFamily = (b === 'cbe' || b === 'cbeagent' || b === 'cbe_agent');
   for (const key of keysToTry) {
     console.log(`[Verify Screenshot] Trying key on Verify.ET for bank (${b}), session:`, sessionId);
     const result = await verifyWithVerifyEtScreenshot(key, imageBuffer, mimeType, b, receivingAccount, sessionId);
     console.log('[Verify Screenshot] Result:', result.success, result.message, result.receipt?.creditedAccount);
 
     if (result.success && result.receipt) {
-      return result;
+      if (isCbeFamily) {
+        const activeAccounts = Array.from(new Set([
+          receivingAccount,
+          ...getActiveBankAccounts(platform, 'cbeagent'),
+          ...getActiveBankAccounts(platform, 'cbe')
+        ].filter(Boolean)));
+        const credited = result.receipt.creditedAccount || result.receipt.receiver;
+        if (activeAccounts.length === 0 || !credited || matchesMaskedAccount(credited, activeAccounts)) {
+          return result;
+        }
+      } else {
+        return result;
+      }
     }
     lastResult = result;
   }
@@ -1210,10 +1376,28 @@ router.post('/verify', (req, res) => {
 
   // Process verification asynchronously in background
   (async () => {
-    if (apiKey && apiKey.trim() && !apiKey.includes('_placeholder')) {
-      const bank = tx.bank || 'telebirr';
-      const targetAccount = tx.accountNumber || tx.phoneNumber;
-      const result = await verifyWithVerifyEtMultiKey(settings, cleanTxId, tx.phoneNumber, activePhones, platform, bank, targetAccount);
+    const bank = tx.bank || 'telebirr';
+    const targetAccount = tx.accountNumber || tx.phoneNumber;
+    let result = null;
+
+    // Direct eBirr Receipt Link / Token extraction (instant verification without verify.et queue)
+    const rawInput = String(transactionId || '');
+    const ebirrUrlMatch = rawInput.match(/https?:\/\/(?:[a-zA-Z0-9-]+\.)*ebirr\.com\/[^\s]+/i);
+    const isEbirrToken = (bank === 'ebirr' || bank === 'siinqee') && (ebirrUrlMatch || /^[A-Za-z0-9_-]{16,40}$/.test(cleanTxId));
+    if (isEbirrToken) {
+      const targetTokenOrUrl = ebirrUrlMatch ? ebirrUrlMatch[0] : cleanTxId;
+      console.log('[Verify Route] Attempting direct eBirr receipt verification for:', targetTokenOrUrl);
+      result = await verifyEbirrReceiptFromUrl(targetTokenOrUrl, platform);
+      console.log('[Verify Route] Direct eBirr outcome:', result?.success, result?.receipt?.transactionId);
+    }
+
+    if (!result || !result.success) {
+      if (apiKey && apiKey.trim() && !apiKey.includes('_placeholder')) {
+        result = await verifyWithVerifyEtMultiKey(settings, cleanTxId, tx.phoneNumber, activePhones, platform, bank, targetAccount);
+      }
+    }
+
+    if (result) {
       console.log('[Verify Route] Outcome:', result.success, result.message, result.receipt);
       const currentTx = getTxById(sessionId);
 
@@ -1265,9 +1449,10 @@ router.post('/verify', (req, res) => {
             receipt: result.receipt
           });
 
-          // Deduct from connected bank account float limit
-          if (updatedTx && updatedTx.bank !== 'telebirr') {
-            deductBankDepositLimit(updatedTx.platform, updatedTx.bank, updatedTx.accountNumber, parsedAmt);
+          // Deduct from connected bank/telebirr account float limit
+          if (updatedTx) {
+            const actualAccount = result.receipt?.creditedAccount || updatedTx.accountNumber || updatedTx.phoneNumber;
+            deductBankDepositLimit(updatedTx.platform, updatedTx.bank, actualAccount, parsedAmt);
           }
 
           // Webhook Callback with HMAC-SHA256 Signature Verification & Retries
@@ -1441,9 +1626,10 @@ router.post('/verify-screenshot', async (req, res) => {
             receiptImage: savedImageUrl
           });
 
-          // Deduct from connected bank account float limit
-          if (updatedTx && updatedTx.bank !== 'telebirr') {
-            deductBankDepositLimit(updatedTx.platform, updatedTx.bank, updatedTx.accountNumber, parsedAmt);
+          // Deduct from connected bank/telebirr account float limit
+          if (updatedTx) {
+            const actualAccount = result.receipt?.creditedAccount || updatedTx.accountNumber || updatedTx.phoneNumber;
+            deductBankDepositLimit(updatedTx.platform, updatedTx.bank, actualAccount, parsedAmt);
           }
 
           // Webhook Callback with HMAC-SHA256 Signature Verification & Retries
