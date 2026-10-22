@@ -105,6 +105,26 @@ function setAgentLimit(agentUsername, initialLimit, remainingLimit) {
   }
 
   writeJSON('bank_accounts.json', data);
+
+  // Sync to numbers.json for telebirr numbers connected to this agent
+  const numData = readJSON('numbers.json');
+  if (numData) {
+    let numChanged = false;
+    for (const [plat, pData] of Object.entries(numData)) {
+      if (!pData || !Array.isArray(pData.numbers)) continue;
+      pData.numbers.forEach(n => {
+        if (n && normalizeAgent(n.connectedAgent) === agentKey) {
+          n.initialLimit = numInit;
+          n.remainingLimit = numRem;
+          numChanged = true;
+        }
+      });
+    }
+    if (numChanged) {
+      writeJSON('numbers.json', numData);
+    }
+  }
+
   return data.agentLimits[agentKey];
 }
 
@@ -128,6 +148,24 @@ function syncAgentSlots(data, agentUsername) {
       });
     }
   }
+
+  const numData = readJSON('numbers.json');
+  if (numData) {
+    let numChanged = false;
+    for (const [plat, pData] of Object.entries(numData)) {
+      if (!pData || !Array.isArray(pData.numbers)) continue;
+      pData.numbers.forEach(n => {
+        if (n && normalizeAgent(n.connectedAgent) === agentKey) {
+          n.initialLimit = Number(lim.initialLimit) || 0;
+          n.remainingLimit = Number(lim.remainingLimit) || 0;
+          numChanged = true;
+        }
+      });
+    }
+    if (numChanged) {
+      writeJSON('numbers.json', numData);
+    }
+  }
 }
 
 /**
@@ -139,14 +177,41 @@ function deductBankDepositLimit(platform, bank, accountNumber, amount) {
   const b = String(bank || '').toLowerCase().trim();
   const accNum = String(accountNumber || '').trim();
   const amt = Number(amount) || 0;
-  if (!accNum || amt <= 0 || b === 'telebirr') return null;
+  if (!accNum || amt <= 0) return null;
 
   const fullData = readJSON('bank_accounts.json') || {};
-  if (!fullData[p] || !Array.isArray(fullData[p][b])) return null;
+  if (!fullData[p]) return null;
 
-  const slot = fullData[p][b].find(a => 
-    String(a.account || '').trim().toLowerCase() === accNum.toLowerCase()
-  );
+  const cleanAcc = accNum.replace(/\D/g, '');
+  let slots = Array.isArray(fullData[p][b]) ? fullData[p][b] : [];
+  let slot = slots.find(a => {
+    const sAcc = String(a.account || a.phone || '').trim().toLowerCase();
+    if (sAcc === accNum.toLowerCase()) return true;
+    const sClean = sAcc.replace(/\D/g, '');
+    return cleanAcc.length >= 6 && (sClean.endsWith(cleanAcc) || cleanAcc.endsWith(sClean));
+  });
+
+  if (!slot && (b === 'cbeagent' || b === 'cbe_agent')) {
+    const cbeSlots = Array.isArray(fullData[p]['cbe']) ? fullData[p]['cbe'] : [];
+    slot = cbeSlots.find(a => {
+      const sAcc = String(a.account || '').trim().toLowerCase();
+      if (sAcc === accNum.toLowerCase()) return true;
+      const sClean = sAcc.replace(/\D/g, '');
+      return cleanAcc.length >= 6 && (sClean.endsWith(cleanAcc) || cleanAcc.endsWith(sClean));
+    });
+  }
+
+  // Also check numbers.json for telebirr
+  if (!slot && b === 'telebirr') {
+    const numData = readJSON('numbers.json') || {};
+    const numSlots = (numData[p] && Array.isArray(numData[p].numbers)) ? numData[p].numbers : [];
+    slot = numSlots.find(n => {
+      const sPhone = String(n.phone || '').trim().toLowerCase();
+      if (sPhone === accNum.toLowerCase()) return true;
+      const sClean = sPhone.replace(/\D/g, '');
+      return cleanAcc.length >= 6 && (sClean.endsWith(cleanAcc) || cleanAcc.endsWith(sClean));
+    });
+  }
 
   if (!slot) return null;
 
@@ -188,6 +253,20 @@ function deductBankDepositLimit(platform, bank, accountNumber, amount) {
     }
 
     writeJSON('bank_accounts.json', fullData);
+
+    if (b === 'telebirr') {
+      const numData = readJSON('numbers.json') || {};
+      if (numData[p] && Array.isArray(numData[p].numbers)) {
+        numData[p].numbers.forEach(n => {
+          if (n && normalizeAgent(n.connectedAgent) === agentKey) {
+            n.initialLimit = currentInit;
+            n.remainingLimit = newRemaining;
+          }
+        });
+        writeJSON('numbers.json', numData);
+      }
+    }
+
     console.log(`[Bank Limit] Deposit ${amt} ETB deducted from shared agent pool '${agentKey}' (via ${p}/${b} ${accNum}). Prev: ${currentRem}, New Remaining: ${newRemaining}`);
     return { ...slot, remainingLimit: newRemaining, initialLimit: currentInit };
   }
@@ -197,6 +276,18 @@ function deductBankDepositLimit(platform, bank, accountNumber, amount) {
     const prev = Number(slot.remainingLimit);
     slot.remainingLimit = Math.max(0, Math.round((prev - amt) * 100) / 100);
     writeJSON('bank_accounts.json', fullData);
+
+    if (b === 'telebirr') {
+      const numData = readJSON('numbers.json') || {};
+      if (numData[p] && Array.isArray(numData[p].numbers)) {
+        const found = numData[p].numbers.find(n => n.id === slot.id);
+        if (found) {
+          found.remainingLimit = slot.remainingLimit;
+          writeJSON('numbers.json', numData);
+        }
+      }
+    }
+
     console.log(`[Bank Limit] Deposit ${amt} ETB deducted from standalone ${p}/${b} account ${accNum}. Prev: ${prev}, New Remaining: ${slot.remainingLimit}`);
     return slot;
   }
@@ -322,6 +413,34 @@ function getAgentConnectedAccounts(agentUsername) {
       });
     }
   }
+  // Also check numbers.json for telebirr
+  const numData = readJSON('numbers.json') || {};
+  for (const [plat, pObj] of Object.entries(numData)) {
+    if (typeof pObj !== 'object' || !pObj || !Array.isArray(pObj.numbers)) continue;
+    pObj.numbers.forEach(n => {
+      if (n && n.connectedAgent) {
+        const ag = normalizeAgent(n.connectedAgent);
+        const agentLim = (fullData.agentLimits && fullData.agentLimits[ag]) ? fullData.agentLimits[ag] : null;
+        const already = connected.some(c => c.bank === 'telebirr' && (c.account === n.phone || (c.platform === plat && c.id === n.id)));
+        if (!already) {
+          const init = agentLim ? Number(agentLim.initialLimit) : Number(n.initialLimit) || 0;
+          const rem = agentLim ? Number(agentLim.remainingLimit) : (n.remainingLimit !== undefined && n.remainingLimit !== null ? Number(n.remainingLimit) : init);
+          connected.push({
+            platform: plat,
+            bank: 'telebirr',
+            id: n.id,
+            account: n.phone,
+            label: n.label || `Telebirr ${n.phone}`,
+            active: n.active !== false,
+            connectedAgent: n.connectedAgent,
+            initialLimit: init,
+            remainingLimit: rem
+          });
+        }
+      }
+    });
+  }
+
   return connected;
 }
 
@@ -358,6 +477,34 @@ function getAllConnectedAccounts() {
       });
     }
   }
+  // Also check numbers.json for telebirr
+  const numData = readJSON('numbers.json') || {};
+  for (const [plat, pObj] of Object.entries(numData)) {
+    if (typeof pObj !== 'object' || !pObj || !Array.isArray(pObj.numbers)) continue;
+    pObj.numbers.forEach(n => {
+      if (n && n.connectedAgent) {
+        const ag = normalizeAgent(n.connectedAgent);
+        const agentLim = (fullData.agentLimits && fullData.agentLimits[ag]) ? fullData.agentLimits[ag] : null;
+        const already = connected.some(c => c.bank === 'telebirr' && (c.account === n.phone || (c.platform === plat && c.id === n.id)));
+        if (!already) {
+          const init = agentLim ? Number(agentLim.initialLimit) : Number(n.initialLimit) || 0;
+          const rem = agentLim ? Number(agentLim.remainingLimit) : (n.remainingLimit !== undefined && n.remainingLimit !== null ? Number(n.remainingLimit) : init);
+          connected.push({
+            platform: plat,
+            bank: 'telebirr',
+            id: n.id,
+            account: n.phone,
+            label: n.label || `Telebirr ${n.phone}`,
+            active: n.active !== false,
+            connectedAgent: n.connectedAgent,
+            initialLimit: init,
+            remainingLimit: rem
+          });
+        }
+      }
+    });
+  }
+
   return connected;
 }
 
