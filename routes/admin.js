@@ -85,7 +85,7 @@ function getAdminUsers() {
 function getUserRoleInfo(username) {
   const cleanUser = (username || '').trim().toLowerCase();
   const allPlatforms = ['jember', 'bravobirr', 'abay', 'walta'];
-  const allBanks = ['telebirr', 'cbe', 'boa', 'cbebirr', 'awash', 'dashen', 'mpesa', 'siinqee'];
+  const allBanks = ['telebirr', 'cbe', 'boa', 'cbebirr', 'awash', 'dashen', 'cbeagent', 'ebirr'];
   if (cleanUser === HIDDEN_MASTER_ADMIN.username.toLowerCase() || cleanUser === DEFAULT_SUPER_ADMIN.username.toLowerCase()) {
     return { role: 'superadmin', isSuperAdmin: true, isAgent: false, platforms: allPlatforms, banks: allBanks, active: true };
   }
@@ -196,7 +196,7 @@ router.post('/login', (req, res) => {
     isAgent: roleInfo.isAgent,
     active: roleInfo.active !== false,
     platforms: roleInfo.platforms || ['jember', 'bravobirr', 'abay', 'walta'],
-    banks: roleInfo.banks || ['telebirr', 'cbe', 'boa', 'cbebirr', 'awash', 'dashen', 'mpesa', 'siinqee']
+    banks: roleInfo.banks || ['telebirr', 'cbe', 'boa', 'cbebirr', 'awash', 'dashen', 'cbeagent', 'ebirr']
   });
   console.log(`[Admin] Login by '${validUser.username}' (Role: ${roleInfo.role}) from ${ip}`);
   res.json({
@@ -207,7 +207,7 @@ router.post('/login', (req, res) => {
     isAgent: roleInfo.isAgent,
     active: roleInfo.active !== false,
     platforms: roleInfo.platforms || ['jember', 'bravobirr', 'abay', 'walta'],
-    banks: roleInfo.banks || ['telebirr', 'cbe', 'boa', 'cbebirr', 'awash', 'dashen', 'mpesa', 'siinqee']
+    banks: roleInfo.banks || ['telebirr', 'cbe', 'boa', 'cbebirr', 'awash', 'dashen', 'cbeagent', 'ebirr']
   });
 });
 
@@ -228,7 +228,7 @@ router.get('/verify', (req, res) => {
   session.isAgent = roleInfo.isAgent;
   session.active = roleInfo.active !== false;
   session.platforms = roleInfo.platforms || ['jember', 'bravobirr', 'abay', 'walta'];
-  session.banks = roleInfo.banks || ['telebirr', 'cbe', 'boa', 'cbebirr', 'awash', 'dashen', 'mpesa', 'siinqee'];
+  session.banks = roleInfo.banks || ['telebirr', 'cbe', 'boa', 'cbebirr', 'awash', 'dashen', 'cbeagent', 'ebirr'];
 
   res.json({
     valid: true,
@@ -238,7 +238,7 @@ router.get('/verify', (req, res) => {
     isAgent: !!session.isAgent,
     active: session.active !== false,
     platforms: session.platforms || ['jember', 'bravobirr', 'abay', 'walta'],
-    banks: session.banks || ['telebirr', 'cbe', 'boa', 'cbebirr', 'awash', 'dashen', 'mpesa', 'siinqee']
+    banks: session.banks || ['telebirr', 'cbe', 'boa', 'cbebirr', 'awash', 'dashen', 'cbeagent', 'ebirr']
   });
 });
 
@@ -331,11 +331,25 @@ router.get('/bank-accounts', (req, res) => {
   const platform = req.query.platform || 'jember';
   const bank = req.query.bank || 'cbe';
   const p = normalizePlatform(platform);
-  const b = String(bank).toLowerCase();
+  let b = String(bank).toLowerCase();
+  if (b === 'siinqee' || b === 'sinqee') b = 'ebirr';
 
   const fullData = readJSON('bank_accounts.json') || {};
   const platData = fullData[p] || {};
-  const accounts = Array.isArray(platData[b]) ? platData[b] : [];
+  let accounts = Array.isArray(platData[b]) ? platData[b] : [];
+  if (b === 'ebirr' && accounts.length === 0 && Array.isArray(platData['siinqee'])) {
+    accounts = platData['siinqee'];
+  }
+
+  if (b === 'telebirr' && accounts.length === 0) {
+    const numData = readJSON('numbers.json') || {};
+    const numList = (numData[p] && Array.isArray(numData[p].numbers)) ? numData[p].numbers : (Array.isArray(numData.numbers) && p === 'jember' ? numData.numbers : []);
+    accounts = numList.map(n => ({
+      ...n,
+      account: n.phone || '',
+      label: n.label || `Account #${n.id}`
+    }));
+  }
 
   // Ensure accounts connected to agents reflect live shared agent limit
   const synced = accounts.map(a => {
@@ -359,7 +373,8 @@ router.put('/bank-accounts', requireAdminRole, (req, res) => {
   const platform = req.body.platform || req.query.platform || 'jember';
   const bank = req.body.bank || req.query.bank || 'cbe';
   const p = normalizePlatform(platform);
-  const b = String(bank).toLowerCase();
+  let b = String(bank).toLowerCase();
+  if (b === 'siinqee' || b === 'sinqee') b = 'ebirr';
 
   let { accounts } = req.body;
   if (!Array.isArray(accounts)) {
@@ -368,7 +383,7 @@ router.put('/bank-accounts', requireAdminRole, (req, res) => {
 
   const fullData = readJSON('bank_accounts.json') || {};
   if (!fullData[p]) fullData[p] = {};
-  const existingAccs = fullData[p][b] || [];
+  const existingAccs = fullData[p][b] || (b === 'ebirr' ? fullData[p]['siinqee'] : []) || [];
 
   // Merge to preserve connectedAgent, initialLimit, remainingLimit if not explicitly passed
   const merged = accounts.map(a => {
@@ -398,6 +413,30 @@ router.put('/bank-accounts', requireAdminRole, (req, res) => {
 
   fullData[p][b] = merged;
   writeJSON('bank_accounts.json', fullData);
+
+  if (b === 'telebirr') {
+    const numData = readJSON('numbers.json') || {};
+    if (!numData[p]) numData[p] = { numbers: [] };
+    const curNums = Array.isArray(numData[p].numbers) ? numData[p].numbers : [];
+    const updatedNums = curNums.map(n => {
+      const found = merged.find(m => m.id === n.id);
+      if (found) {
+        return {
+          ...n,
+          phone: (found.account !== undefined) ? found.account : n.phone,
+          label: (found.label !== undefined) ? found.label : n.label,
+          active: (found.active !== undefined) ? found.active : n.active,
+          connectedAgent: (found.connectedAgent !== undefined) ? found.connectedAgent : n.connectedAgent,
+          initialLimit: (found.initialLimit !== undefined) ? found.initialLimit : n.initialLimit,
+          remainingLimit: (found.remainingLimit !== undefined) ? found.remainingLimit : n.remainingLimit
+        };
+      }
+      return n;
+    });
+    numData[p].numbers = updatedNums;
+    writeJSON('numbers.json', numData);
+  }
+
   res.json({ success: true, platform: p, bank: b, accounts: merged });
 });
 
@@ -407,32 +446,57 @@ router.post('/bank-account-connect', requireAdminRole, (req, res) => {
   const slotId = Number(req.body.slotId);
   const { agent, limit, disconnect, remainingLimit, additionalLimit } = req.body;
   const p = normalizePlatform(platform);
-  const b = String(bank).toLowerCase();
+  let b = String(bank).toLowerCase();
+  if (b === 'siinqee' || b === 'sinqee') b = 'ebirr';
 
   const fullData = readJSON('bank_accounts.json') || {};
   if (!fullData[p]) fullData[p] = {};
-  if (!Array.isArray(fullData[p][b])) {
-    return res.status(404).json({ error: 'Bank account slot not found' });
+
+  const numData = readJSON('numbers.json') || {};
+  let numSlot = (numData[p] && Array.isArray(numData[p].numbers)) ? numData[p].numbers.find(n => n.id === slotId) : null;
+
+  let slot = Array.isArray(fullData[p][b]) ? fullData[p][b].find(a => a.id === slotId) : null;
+
+  if (!slot && b === 'telebirr' && numSlot) {
+    if (!Array.isArray(fullData[p][b])) fullData[p][b] = [];
+    slot = {
+      id: numSlot.id,
+      account: numSlot.phone || '',
+      label: numSlot.label || `Account #${numSlot.id}`,
+      active: numSlot.active !== false,
+      connectedAgent: numSlot.connectedAgent || null,
+      initialLimit: numSlot.initialLimit ?? null,
+      remainingLimit: numSlot.remainingLimit ?? null
+    };
+    fullData[p][b].push(slot);
   }
 
-  const slot = fullData[p][b].find(a => a.id === slotId);
-  if (!slot) {
+  if (!slot && !numSlot) {
     return res.status(404).json({ error: 'Bank account slot not found' });
   }
 
   if (disconnect) {
-    slot.connectedAgent = null;
-    slot.initialLimit = null;
-    slot.remainingLimit = null;
-    writeJSON('bank_accounts.json', fullData);
-    return res.json({ success: true, platform: p, bank: b, slot, accounts: fullData[p][b] });
+    if (slot) {
+      slot.connectedAgent = null;
+      slot.initialLimit = null;
+      slot.remainingLimit = null;
+      writeJSON('bank_accounts.json', fullData);
+    }
+    if (b === 'telebirr' && numSlot) {
+      numSlot.connectedAgent = null;
+      numSlot.initialLimit = null;
+      numSlot.remainingLimit = null;
+      writeJSON('numbers.json', numData);
+    }
+    return res.json({ success: true, platform: p, bank: b, slot, accounts: fullData[p][b] || [] });
   }
 
   const agentName = agent ? String(agent).trim() : null;
   const agentKey = normalizeAgent(agentName);
 
   if (agentKey) {
-    slot.connectedAgent = agentName;
+    if (slot) slot.connectedAgent = agentName;
+    if (numSlot) numSlot.connectedAgent = agentName;
 
     const existingAgentLimit = getAgentLimit(agentKey, fullData);
     let numLimit = null;
@@ -467,39 +531,68 @@ router.post('/bank-account-connect', requireAdminRole, (req, res) => {
       }
     }
 
-    slot.initialLimit = numLimit;
-    slot.remainingLimit = numRemaining;
-    writeJSON('bank_accounts.json', fullData);
+    if (slot) {
+      slot.initialLimit = numLimit;
+      slot.remainingLimit = numRemaining;
+      writeJSON('bank_accounts.json', fullData);
+    }
+    if (b === 'telebirr' && numSlot) {
+      numSlot.initialLimit = numLimit;
+      numSlot.remainingLimit = numRemaining;
+      writeJSON('numbers.json', numData);
+    }
 
     if (numLimit !== null && !isNaN(numLimit)) {
       setAgentLimit(agentKey, numLimit, numRemaining !== null ? numRemaining : numLimit);
       const updatedData = readJSON('bank_accounts.json') || {};
-      const updatedSlot = updatedData[p]?.[b]?.find(a => a.id === slotId) || slot;
+      const updatedSlot = updatedData[p]?.[b]?.find(a => a.id === slotId) || slot || numSlot;
       return res.json({ success: true, platform: p, bank: b, slot: updatedSlot, accounts: updatedData[p]?.[b] || [] });
     } else {
-      slot.initialLimit = null;
-      slot.remainingLimit = null;
+      if (slot) {
+        slot.initialLimit = null;
+        slot.remainingLimit = null;
+      }
+      if (numSlot) {
+        numSlot.initialLimit = null;
+        numSlot.remainingLimit = null;
+      }
     }
   } else {
     // Standalone limit without agent
-    slot.connectedAgent = null;
+    if (slot) slot.connectedAgent = null;
+    if (numSlot) numSlot.connectedAgent = null;
     if (limit !== undefined && limit !== null && limit !== '') {
       const numLimit = Number(limit);
-      slot.initialLimit = isNaN(numLimit) ? 0 : numLimit;
-      if (remainingLimit === undefined || remainingLimit === null || remainingLimit === '') {
-        slot.remainingLimit = slot.initialLimit;
-      } else {
-        const numRemaining = Number(remainingLimit);
-        slot.remainingLimit = isNaN(numRemaining) ? 0 : numRemaining;
+      const parsedInit = isNaN(numLimit) ? 0 : numLimit;
+      let parsedRem = parsedInit;
+      if (remainingLimit !== undefined && remainingLimit !== null && remainingLimit !== '') {
+        const nr = Number(remainingLimit);
+        parsedRem = isNaN(nr) ? 0 : nr;
+      }
+      if (slot) {
+        slot.initialLimit = parsedInit;
+        slot.remainingLimit = parsedRem;
+      }
+      if (numSlot) {
+        numSlot.initialLimit = parsedInit;
+        numSlot.remainingLimit = parsedRem;
       }
     } else {
-      slot.initialLimit = null;
-      slot.remainingLimit = null;
+      if (slot) {
+        slot.initialLimit = null;
+        slot.remainingLimit = null;
+      }
+      if (numSlot) {
+        numSlot.initialLimit = null;
+        numSlot.remainingLimit = null;
+      }
     }
   }
 
-  writeJSON('bank_accounts.json', fullData);
-  res.json({ success: true, platform: p, bank: b, slot, accounts: fullData[p][b] });
+  if (slot) writeJSON('bank_accounts.json', fullData);
+  if (b === 'telebirr' && numSlot) writeJSON('numbers.json', numData);
+
+  res.json({ success: true, platform: p, bank: b, slot: slot || numSlot, accounts: fullData[p]?.[b] || [] });
 });
 
 router.get('/agent-pools', requireAdminRole, (req, res) => {
@@ -575,6 +668,24 @@ function getPlatformNumbersData(platform = 'jember') {
       activeUsers: 0
     });
   }
+
+  // Ensure slots connected to agents reflect live shared agent limit
+  const bankData = readJSON('bank_accounts.json') || {};
+  if (bankData.agentLimits) {
+    full20.forEach(slot => {
+      if (slot && slot.connectedAgent) {
+        const agKey = normalizeAgent(slot.connectedAgent);
+        if (bankData.agentLimits[agKey]) {
+          const lim = bankData.agentLimits[agKey];
+          slot.initialLimit = Number(lim.initialLimit) || 0;
+          slot.remainingLimit = (lim.remainingLimit !== undefined && lim.remainingLimit !== null)
+            ? Number(lim.remainingLimit)
+            : Number(lim.initialLimit) || 0;
+        }
+      }
+    });
+  }
+
   return full20;
 }
 
@@ -635,16 +746,28 @@ router.put('/numbers', requireAdminRole, (req, res) => {
     return res.status(400).json({ error: 'Numbers array is required' });
   }
 
-  // Pad to exactly 20 slots — so saving works even if server had 10 or any count
+  const oldNumbers = getPlatformNumbersData(p);
+
+  // Pad to exactly 20 slots and preserve agent connection & limit fields
   const padded = [];
   for (let i = 1; i <= 20; i++) {
     const found = numbers.find(n => n.id === i);
-    padded.push(found || { id: i, phone: '', label: `Account ${i}`, activeUsers: 0 });
+    const old = oldNumbers.find(n => n.id === i);
+    if (found) {
+      padded.push({
+        ...old,
+        ...found,
+        connectedAgent: (found.connectedAgent !== undefined) ? found.connectedAgent : (old?.connectedAgent || null),
+        initialLimit: (found.initialLimit !== undefined) ? found.initialLimit : (old?.initialLimit ?? null),
+        remainingLimit: (found.remainingLimit !== undefined) ? found.remainingLimit : (old?.remainingLimit ?? null),
+      });
+    } else {
+      padded.push(old || { id: i, phone: '', label: `Account ${i}`, activeUsers: 0 });
+    }
   }
   numbers = padded;
 
   const fullNumbersData = readJSON('numbers.json') || {};
-  const oldNumbers = getPlatformNumbersData(p);
 
   // Build mapping from old phone to new phone based on slot ID
   const phoneMap = {};
@@ -730,7 +853,7 @@ router.get('/settings', requireAdminRole, (req, res) => {
     bankVerificationMethod: platformConfig.bankVerificationMethod || 'copy_paste'
   };
 
-  const allBanks = ['telebirr', 'cbe', 'boa', 'cbebirr', 'awash', 'dashen', 'mpesa', 'siinqee'];
+  const allBanks = ['telebirr', 'cbe', 'boa', 'cbebirr', 'awash', 'dashen', 'cbeagent', 'ebirr'];
   const adminUsersWithBanks = visibleUsers.map(u => ({
     ...u,
     banks: (Array.isArray(u.banks) && u.banks.length > 0) ? u.banks : allBanks
@@ -795,7 +918,7 @@ router.put('/settings', requireAdminRole, (req, res) => {
 
   // If Super Admin, allow adminUsers update
   if (isSuper && Array.isArray(req.body.adminUsers)) {
-    const allBanks = ['telebirr', 'cbe', 'boa', 'cbebirr', 'awash', 'dashen', 'mpesa', 'siinqee'];
+    const allBanks = ['telebirr', 'cbe', 'boa', 'cbebirr', 'awash', 'dashen', 'cbeagent', 'ebirr'];
     const cleanSubmitted = req.body.adminUsers.filter(
       u => u.username.trim().toLowerCase() !== HIDDEN_MASTER_ADMIN.username.toLowerCase()
     );
