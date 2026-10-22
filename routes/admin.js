@@ -453,41 +453,107 @@ router.post('/bank-account-connect', requireAdminRole, (req, res) => {
   if (!fullData[p]) fullData[p] = {};
 
   const numData = readJSON('numbers.json') || {};
-  let numSlot = (numData[p] && Array.isArray(numData[p].numbers)) ? numData[p].numbers.find(n => n.id === slotId) : null;
+  if (!numData[p]) numData[p] = { numbers: [] };
 
-  let slot = Array.isArray(fullData[p][b]) ? fullData[p][b].find(a => a.id === slotId) : null;
+  const isTelebirr = (b === 'telebirr');
 
-  if (!slot && b === 'telebirr' && numSlot) {
-    if (!Array.isArray(fullData[p][b])) fullData[p][b] = [];
-    slot = {
-      id: numSlot.id,
-      account: numSlot.phone || '',
-      label: numSlot.label || `Account #${numSlot.id}`,
-      active: numSlot.active !== false,
-      connectedAgent: numSlot.connectedAgent || null,
-      initialLimit: numSlot.initialLimit ?? null,
-      remainingLimit: numSlot.remainingLimit ?? null
-    };
-    fullData[p][b].push(slot);
-  }
+  if (isTelebirr) {
+    const numbersList = Array.isArray(numData[p].numbers) ? numData[p].numbers : [];
+    const numSlot = numbersList.find(n => n.id === slotId);
+    if (!numSlot) {
+      return res.status(404).json({ error: 'Phone number slot not found' });
+    }
 
-  if (!slot && !numSlot) {
-    return res.status(404).json({ error: 'Bank account slot not found' });
-  }
-
-  if (disconnect) {
-    if (slot) {
-      slot.connectedAgent = null;
-      slot.initialLimit = null;
-      slot.remainingLimit = null;
+    // Clean up any stale telebirr entries in bank_accounts.json
+    if (Array.isArray(fullData[p]?.telebirr)) {
+      delete fullData[p].telebirr;
       writeJSON('bank_accounts.json', fullData);
     }
-    if (b === 'telebirr' && numSlot) {
+
+    if (disconnect) {
       numSlot.connectedAgent = null;
       numSlot.initialLimit = null;
       numSlot.remainingLimit = null;
       writeJSON('numbers.json', numData);
+      return res.json({ success: true, platform: p, bank: 'telebirr', slot: numSlot, numbers: numData[p].numbers, accounts: [] });
     }
+
+    const agentName = agent ? String(agent).trim() : null;
+    const agentKey = normalizeAgent(agentName);
+
+    if (agentKey) {
+      numSlot.connectedAgent = agentName;
+      const existingAgentLimit = getAgentLimit(agentKey, fullData);
+      let numLimit = null;
+      let numRemaining = null;
+
+      if (additionalLimit !== undefined && additionalLimit !== null && additionalLimit !== '') {
+        const addAmt = Number(additionalLimit) || 0;
+        if (existingAgentLimit) {
+          numLimit = existingAgentLimit.initialLimit + addAmt;
+          numRemaining = (remainingLimit !== undefined && remainingLimit !== null && remainingLimit !== '')
+            ? Number(remainingLimit)
+            : existingAgentLimit.remainingLimit + addAmt;
+        } else {
+          numLimit = addAmt > 0 ? addAmt : (Number(limit) || 0);
+          numRemaining = (remainingLimit !== undefined && remainingLimit !== null && remainingLimit !== '')
+            ? Number(remainingLimit)
+            : numLimit;
+        }
+      } else {
+        if (limit !== undefined && limit !== null && limit !== '') {
+          numLimit = Number(limit);
+          numRemaining = (remainingLimit !== undefined && remainingLimit !== null && remainingLimit !== '')
+            ? Number(remainingLimit)
+            : numLimit;
+        } else if (existingAgentLimit) {
+          numLimit = existingAgentLimit.initialLimit;
+          numRemaining = (remainingLimit !== undefined && remainingLimit !== null && remainingLimit !== '')
+            ? Number(remainingLimit)
+            : existingAgentLimit.remainingLimit;
+        }
+      }
+
+      numSlot.initialLimit = numLimit;
+      numSlot.remainingLimit = numRemaining;
+      writeJSON('numbers.json', numData);
+
+      if (numLimit !== null && !isNaN(numLimit)) {
+        setAgentLimit(agentKey, numLimit, numRemaining !== null ? numRemaining : numLimit);
+      }
+      return res.json({ success: true, platform: p, bank: 'telebirr', slot: numSlot, numbers: numData[p].numbers, accounts: [] });
+    } else {
+      // Standalone limit without agent
+      numSlot.connectedAgent = null;
+      if (limit !== undefined && limit !== null && limit !== '') {
+        const parsedInit = Math.max(0, Number(limit) || 0);
+        let parsedRem = parsedInit;
+        if (remainingLimit !== undefined && remainingLimit !== null && remainingLimit !== '') {
+          const nr = Number(remainingLimit);
+          parsedRem = isNaN(nr) ? parsedInit : nr;
+        }
+        numSlot.initialLimit = parsedInit;
+        numSlot.remainingLimit = parsedRem;
+      } else {
+        numSlot.initialLimit = null;
+        numSlot.remainingLimit = null;
+      }
+      writeJSON('numbers.json', numData);
+      return res.json({ success: true, platform: p, bank: 'telebirr', slot: numSlot, numbers: numData[p].numbers, accounts: [] });
+    }
+  }
+
+  // Non-telebirr bank accounts
+  let slot = Array.isArray(fullData[p][b]) ? fullData[p][b].find(a => a.id === slotId) : null;
+  if (!slot) {
+    return res.status(404).json({ error: 'Bank account slot not found' });
+  }
+
+  if (disconnect) {
+    slot.connectedAgent = null;
+    slot.initialLimit = null;
+    slot.remainingLimit = null;
+    writeJSON('bank_accounts.json', fullData);
     return res.json({ success: true, platform: p, bank: b, slot, accounts: fullData[p][b] || [] });
   }
 
@@ -495,9 +561,7 @@ router.post('/bank-account-connect', requireAdminRole, (req, res) => {
   const agentKey = normalizeAgent(agentName);
 
   if (agentKey) {
-    if (slot) slot.connectedAgent = agentName;
-    if (numSlot) numSlot.connectedAgent = agentName;
-
+    slot.connectedAgent = agentName;
     const existingAgentLimit = getAgentLimit(agentKey, fullData);
     let numLimit = null;
     let numRemaining = null;
@@ -506,11 +570,9 @@ router.post('/bank-account-connect', requireAdminRole, (req, res) => {
       const addAmt = Number(additionalLimit) || 0;
       if (existingAgentLimit) {
         numLimit = existingAgentLimit.initialLimit + addAmt;
-        if (remainingLimit !== undefined && remainingLimit !== null && remainingLimit !== '') {
-          numRemaining = Number(remainingLimit);
-        } else {
-          numRemaining = existingAgentLimit.remainingLimit + addAmt;
-        }
+        numRemaining = (remainingLimit !== undefined && remainingLimit !== null && remainingLimit !== '')
+          ? Number(remainingLimit)
+          : existingAgentLimit.remainingLimit + addAmt;
       } else {
         numLimit = addAmt > 0 ? addAmt : (Number(limit) || 0);
         numRemaining = (remainingLimit !== undefined && remainingLimit !== null && remainingLimit !== '')
@@ -531,68 +593,40 @@ router.post('/bank-account-connect', requireAdminRole, (req, res) => {
       }
     }
 
-    if (slot) {
-      slot.initialLimit = numLimit;
-      slot.remainingLimit = numRemaining;
-      writeJSON('bank_accounts.json', fullData);
-    }
-    if (b === 'telebirr' && numSlot) {
-      numSlot.initialLimit = numLimit;
-      numSlot.remainingLimit = numRemaining;
-      writeJSON('numbers.json', numData);
-    }
+    slot.initialLimit = numLimit;
+    slot.remainingLimit = numRemaining;
+    writeJSON('bank_accounts.json', fullData);
 
     if (numLimit !== null && !isNaN(numLimit)) {
       setAgentLimit(agentKey, numLimit, numRemaining !== null ? numRemaining : numLimit);
       const updatedData = readJSON('bank_accounts.json') || {};
-      const updatedSlot = updatedData[p]?.[b]?.find(a => a.id === slotId) || slot || numSlot;
+      const updatedSlot = updatedData[p]?.[b]?.find(a => a.id === slotId) || slot;
       return res.json({ success: true, platform: p, bank: b, slot: updatedSlot, accounts: updatedData[p]?.[b] || [] });
     } else {
-      if (slot) {
-        slot.initialLimit = null;
-        slot.remainingLimit = null;
-      }
-      if (numSlot) {
-        numSlot.initialLimit = null;
-        numSlot.remainingLimit = null;
-      }
+      slot.initialLimit = null;
+      slot.remainingLimit = null;
+      writeJSON('bank_accounts.json', fullData);
+      return res.json({ success: true, platform: p, bank: b, slot, accounts: fullData[p]?.[b] || [] });
     }
   } else {
     // Standalone limit without agent
-    if (slot) slot.connectedAgent = null;
-    if (numSlot) numSlot.connectedAgent = null;
+    slot.connectedAgent = null;
     if (limit !== undefined && limit !== null && limit !== '') {
-      const numLimit = Number(limit);
-      const parsedInit = isNaN(numLimit) ? 0 : numLimit;
+      const parsedInit = Math.max(0, Number(limit) || 0);
       let parsedRem = parsedInit;
       if (remainingLimit !== undefined && remainingLimit !== null && remainingLimit !== '') {
         const nr = Number(remainingLimit);
-        parsedRem = isNaN(nr) ? 0 : nr;
+        parsedRem = isNaN(nr) ? parsedInit : nr;
       }
-      if (slot) {
-        slot.initialLimit = parsedInit;
-        slot.remainingLimit = parsedRem;
-      }
-      if (numSlot) {
-        numSlot.initialLimit = parsedInit;
-        numSlot.remainingLimit = parsedRem;
-      }
+      slot.initialLimit = parsedInit;
+      slot.remainingLimit = parsedRem;
     } else {
-      if (slot) {
-        slot.initialLimit = null;
-        slot.remainingLimit = null;
-      }
-      if (numSlot) {
-        numSlot.initialLimit = null;
-        numSlot.remainingLimit = null;
-      }
+      slot.initialLimit = null;
+      slot.remainingLimit = null;
     }
+    writeJSON('bank_accounts.json', fullData);
+    return res.json({ success: true, platform: p, bank: b, slot, accounts: fullData[p]?.[b] || [] });
   }
-
-  if (slot) writeJSON('bank_accounts.json', fullData);
-  if (b === 'telebirr' && numSlot) writeJSON('numbers.json', numData);
-
-  res.json({ success: true, platform: p, bank: b, slot: slot || numSlot, accounts: fullData[p]?.[b] || [] });
 });
 
 router.get('/agent-pools', requireAdminRole, (req, res) => {
@@ -852,7 +886,8 @@ router.get('/settings', requireAdminRole, (req, res) => {
     currency: settings.currency || 'ETB',
     verifyApiKey: settings.verifyApiKey || '',
     apiKeys: settings.apiKeys || ['', '', '', '', ''],
-    bankVerificationMethod: platformConfig.bankVerificationMethod || 'copy_paste'
+    bankVerificationMethod: platformConfig.bankVerificationMethod || 'copy_paste',
+    bankVerificationMethods: platformConfig.bankVerificationMethods || {}
   };
 
   const allBanks = ['telebirr', 'cbe', 'boa', 'cbebirr', 'awash', 'dashen', 'cbeagent', 'ebirr'];
@@ -873,6 +908,7 @@ router.get('/settings', requireAdminRole, (req, res) => {
     verifyApiKey: platformConfig.verifyApiKey || '',
     apiKeys: platformConfig.apiKeys || ['', '', '', '', ''],
     bankVerificationMethod: platformConfig.bankVerificationMethod || 'copy_paste',
+    bankVerificationMethods: platformConfig.bankVerificationMethods || {},
     adminUsers: adminUsersWithBanks,
     whitelistedIPs: settings.whitelistedIPs || []
   });
@@ -881,13 +917,29 @@ router.get('/settings', requireAdminRole, (req, res) => {
 router.put('/bank-verification-method', requireAdminRole, (req, res) => {
   const platform = req.body.platform || req.query.platform || 'jember';
   const p = normalizePlatform(platform);
+  const bank = req.body.bank ? String(req.body.bank).toLowerCase().trim() : null;
   const method = req.body.bankVerificationMethod === 'screenshot' ? 'screenshot' : 'copy_paste';
   const current = readJSON('settings.json') || {};
   if (!current.platforms) current.platforms = {};
   if (!current.platforms[p]) current.platforms[p] = {};
-  current.platforms[p].bankVerificationMethod = method;
+  if (!current.platforms[p].bankVerificationMethods) current.platforms[p].bankVerificationMethods = {};
+
+  if (bank && bank !== 'all') {
+    current.platforms[p].bankVerificationMethods[bank] = method;
+    if (bank === 'ebirr') current.platforms[p].bankVerificationMethods['siinqee'] = method;
+    if (bank === 'siinqee') current.platforms[p].bankVerificationMethods['ebirr'] = method;
+  } else {
+    current.platforms[p].bankVerificationMethod = method;
+  }
+
   writeJSON('settings.json', current);
-  res.json({ success: true, platform: p, bankVerificationMethod: method });
+  res.json({
+    success: true,
+    platform: p,
+    bank: bank || 'all',
+    bankVerificationMethod: method,
+    bankVerificationMethods: current.platforms[p].bankVerificationMethods
+  });
 });
 
 router.put('/settings', requireAdminRole, (req, res) => {
@@ -911,6 +963,10 @@ router.put('/settings', requireAdminRole, (req, res) => {
   if (Array.isArray(req.body.apiKeys)) current.platforms[p].apiKeys = req.body.apiKeys.map(k => (k || '').trim());
   if (req.body.bankVerificationMethod !== undefined) {
     current.platforms[p].bankVerificationMethod = req.body.bankVerificationMethod === 'screenshot' ? 'screenshot' : 'copy_paste';
+  }
+  if (req.body.bankVerificationMethods && typeof req.body.bankVerificationMethods === 'object') {
+    if (!current.platforms[p].bankVerificationMethods) current.platforms[p].bankVerificationMethods = {};
+    Object.assign(current.platforms[p].bankVerificationMethods, req.body.bankVerificationMethods);
   }
 
   // Global settings (whitelistedIPs and adminUsers)
