@@ -7,16 +7,24 @@
  * and accurately adjusts the agent float pools so agents cannot keep unaccounted float.
  * 
  * Usage:
- *   node backend/scripts/reconcileCbeLimits.js [--dry-run]
- *   node backend/scripts/reconcileCbeLimits.js --apply
- *   node backend/scripts/reconcileCbeLimits.js --bank cbe [--apply]
+ *   node scripts/reconcileCbeLimits.js [--dry-run]
+ *   node scripts/reconcileCbeLimits.js --apply
+ *   node scripts/reconcileCbeLimits.js --bank cbe [--apply]
  */
 
 const fs = require('fs');
 const path = require('path');
-const { getEthiopianTimeMidnightTimestamps } = require('../routes/admin');
-const { readJSON, writeJSON, normalizeAgent, normalizePlatform } = require('../bankLimits');
-const { db } = require('../db');
+
+const backendDir = (() => {
+  if (fs.existsSync(path.join(__dirname, '../backend'))) return path.join(__dirname, '../backend');
+  if (fs.existsSync(path.join(__dirname, '../routes/admin.js'))) return path.join(__dirname, '..');
+  if (fs.existsSync(path.join(process.cwd(), 'backend'))) return path.join(process.cwd(), 'backend');
+  return path.join(__dirname, '..');
+})();
+
+const { getEthiopianTimeMidnightTimestamps } = require(path.join(backendDir, 'routes/admin'));
+const { readJSON, writeJSON, normalizeAgent, normalizePlatform } = require(path.join(backendDir, 'bankLimits'));
+const { db } = require(path.join(backendDir, 'db'));
 
 const args = process.argv.slice(2);
 const isApply = args.includes('--apply');
@@ -79,7 +87,7 @@ function matchAccount(creditedStr, slotAcc) {
 }
 
 // 1. Collect all connected agent accounts (all banks and Telebirr)
-const connectedAgentAccounts = []; // { agent, rawAgent, platform, bank, id, account }
+const connectedAgentAccounts = [];
 
 for (const [platform, bMap] of Object.entries(bankData)) {
   if (!bMap || typeof bMap !== 'object' || platform === 'agentLimits') continue;
@@ -149,7 +157,7 @@ const verifiedToday = db.prepare(depositSql).all(...depositParams);
 console.log(`\nFound ${verifiedToday.length} verified deposit transactions today.`);
 
 // 3. Match deposit transactions to agents
-const agentDepositTotals = {}; // agentKey -> { totalETB: number, count: number, byBank: {}, txs: [] }
+const agentDepositTotals = {};
 
 verifiedToday.forEach(tx => {
   const amt = Number(tx.verifiedAmount || tx.amount || 0);
@@ -204,7 +212,7 @@ const completedWithdrawals = db.prepare(`
     AND createdAt >= ?
 `).all(todayStart);
 
-const agentWithdrawalTotals = {}; // agentKey -> number
+const agentWithdrawalTotals = {};
 completedWithdrawals.forEach(w => {
   const ag = normalizeAgent(w.assignedAgent || w.processedBy);
   if (ag && ag !== 'admin') {
@@ -232,7 +240,6 @@ for (const agentKey of allTargetAgents) {
   const initialLimit = pool ? Number(pool.initialLimit || 0) : 0;
   const currentRemaining = pool ? Number(pool.remainingLimit || 0) : 0;
 
-  // Recalculated remaining float: initialLimit - depositsToday + withdrawalsToday (capped at initialLimit)
   const netDeduction = stat.totalETB - withdrawTotal;
   const recalculatedRemaining = Math.min(initialLimit, Math.max(0, initialLimit - netDeduction));
 
@@ -296,7 +303,6 @@ if (isApply) {
   console.log('\n[SUCCESS] Updated bank_accounts.json and numbers.json with reconciled float pools.');
 } else {
   console.log('\n[DRY RUN COMPLETE] To apply these deductions to Hostinger float pools, run:');
-  console.log('  node backend/scripts/reconcileCbeLimits.js --apply');
+  console.log('  node scripts/reconcileCbeLimits.js --apply');
 }
 console.log('='.repeat(70));
-
