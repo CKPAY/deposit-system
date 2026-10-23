@@ -5,7 +5,7 @@ const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
-const { deductBankDepositLimit } = require('../bankLimits');
+const { deductBankDepositLimit, findVerifiedSlot, matchSlotAccount } = require('../bankLimits');
 
 // Secret Keys per betting platform
 function getPlatformSecret(platform = 'jember') {
@@ -1162,11 +1162,19 @@ async function verifyWithVerifyEtMultiKey(settings, transactionId, targetPhoneNu
   }
 
   const isCbeFamily = (b === 'cbe' || b === 'cbeagent' || b === 'cbe_agent');
+  const isEbirrFamily = (b === 'ebirr' || b === 'siinqee');
   let candidateAccounts = [receivingAccount].filter(Boolean);
   if (isCbeFamily) {
     const activeCbe = getActiveBankAccounts(platform, 'cbe');
     const activeAgent = getActiveBankAccounts(platform, 'cbeagent');
     candidateAccounts = Array.from(new Set([...candidateAccounts, ...activeAgent, ...activeCbe].filter(Boolean)));
+  } else if (isEbirrFamily) {
+    const activeEbirr = getActiveBankAccounts(platform, 'ebirr');
+    const activeSiinqee = getActiveBankAccounts(platform, 'siinqee');
+    candidateAccounts = Array.from(new Set([...candidateAccounts, ...activeEbirr, ...activeSiinqee].filter(Boolean)));
+  } else if (b !== 'telebirr') {
+    const activeBankAccs = getActiveBankAccounts(platform, b);
+    candidateAccounts = Array.from(new Set([...candidateAccounts, ...activeBankAccs].filter(Boolean)));
   }
 
   let lastResult = null;
@@ -1174,7 +1182,7 @@ async function verifyWithVerifyEtMultiKey(settings, transactionId, targetPhoneNu
   for (const key of keysToTry) {
     if (!key || key.includes('_placeholder')) continue;
 
-    const accountsToTest = (isCbeFamily && candidateAccounts.length > 0) ? candidateAccounts : [receivingAccount];
+    const accountsToTest = (b !== 'telebirr' && candidateAccounts.length > 0) ? candidateAccounts : [receivingAccount];
 
     for (const testAcc of accountsToTest) {
       console.log(`[Verify] Trying key on Verify.ET for tx (${b}), acc (${testAcc}):`, transactionId);
@@ -1190,13 +1198,15 @@ async function verifyWithVerifyEtMultiKey(settings, transactionId, targetPhoneNu
             return result;
           }
         } else {
+          result.matchedAccount = testAcc;
+          if (!result.receipt.creditedAccount && testAcc) {
+            result.receipt.creditedAccount = testAcc;
+          }
           if (result.settlementMatch === true) {
             return result;
           }
           const credited = result.receipt.creditedAccount || result.receipt.receiver;
-          const activeAccounts = isCbeFamily
-            ? candidateAccounts
-            : getActiveBankAccounts(platform, b);
+          const activeAccounts = candidateAccounts.length > 0 ? candidateAccounts : getActiveBankAccounts(platform, b);
           if (activeAccounts.length === 0 || !credited) {
             return result;
           }
@@ -1341,20 +1351,24 @@ async function verifyWithVerifyEtScreenshotMultiKey(settings, imageBuffer, mimeT
 
   let lastResult = null;
   const isCbeFamily = (b === 'cbe' || b === 'cbeagent' || b === 'cbe_agent');
+  const isEbirrFamily = (b === 'ebirr' || b === 'siinqee');
+  const allActiveAccounts = isCbeFamily
+    ? Array.from(new Set([receivingAccount, ...getActiveBankAccounts(platform, 'cbeagent'), ...getActiveBankAccounts(platform, 'cbe')].filter(Boolean)))
+    : isEbirrFamily
+    ? Array.from(new Set([receivingAccount, ...getActiveBankAccounts(platform, 'ebirr'), ...getActiveBankAccounts(platform, 'siinqee')].filter(Boolean)))
+    : (b !== 'telebirr')
+    ? Array.from(new Set([receivingAccount, ...getActiveBankAccounts(platform, b)].filter(Boolean)))
+    : [];
+
   for (const key of keysToTry) {
     console.log(`[Verify Screenshot] Trying key on Verify.ET for bank (${b}), session:`, sessionId);
-    const result = await verifyWithVerifyEtScreenshot(key, imageBuffer, mimeType, b, receivingAccount, sessionId);
+    const result = await verifyWithVerifyEtScreenshot(key, imageBuffer, mimeType, b, '', sessionId);
     console.log('[Verify Screenshot] Result:', result.success, result.message, result.receipt?.creditedAccount);
 
     if (result.success && result.receipt) {
-      if (isCbeFamily) {
-        const activeAccounts = Array.from(new Set([
-          receivingAccount,
-          ...getActiveBankAccounts(platform, 'cbeagent'),
-          ...getActiveBankAccounts(platform, 'cbe')
-        ].filter(Boolean)));
+      if (allActiveAccounts.length > 0) {
         const credited = result.receipt.creditedAccount || result.receipt.receiver;
-        if (activeAccounts.length === 0 || !credited || matchesMaskedAccount(credited, activeAccounts)) {
+        if (!credited || matchesMaskedAccount(credited, allActiveAccounts)) {
           return result;
         }
       } else {
@@ -1487,27 +1501,41 @@ router.post('/verify', (req, res) => {
           }
 
           const verifiedTxId = cleanTxId || (result.receipt && (result.receipt.transactionId || result.receipt.receiptNumber)) || null;
+
+          // Identify actual receiving slot and agent from verified receipt
+          const hasDigitsOrMask = (str) => str && (/\d/.test(String(str)) || String(str).includes('*'));
+          const verifiedIdentifier = (result.matchedAccount && hasDigitsOrMask(result.matchedAccount) ? result.matchedAccount : null)
+            || (hasDigitsOrMask(result.receipt?.creditedAccount) ? result.receipt.creditedAccount : null)
+            || (hasDigitsOrMask(result.receipt?.receiver) ? result.receipt.receiver : null);
+
+          const actualSlot = findVerifiedSlot(currentTx.platform, currentTx.bank, verifiedIdentifier);
+          const actualAgent = (actualSlot && actualSlot.connectedAgent) ? actualSlot.connectedAgent : currentTx.assignedAgent;
+          const actualAccount = (actualSlot && (actualSlot.account || actualSlot.phone)) ? (actualSlot.account || actualSlot.phone) : (verifiedIdentifier || currentTx.accountNumber || currentTx.phoneNumber);
+          const actualBank = (actualSlot && actualSlot.bank) ? actualSlot.bank : currentTx.bank;
+
+          console.log(`[Verify Route] True recipient resolved: Agent '${actualAgent}', Bank '${actualBank}', Account '${actualAccount}' (Display was Agent '${currentTx.assignedAgent}', Bank '${currentTx.bank}', Account '${currentTx.accountNumber || currentTx.phoneNumber}')`);
+
           const updatedTx = updateTxStatus(sessionId, 'verified', {
             transactionId: verifiedTxId,
             amount: parsedAmt,
             verifiedAmount: parsedAmt,
             failReason: null,
-            receipt: result.receipt
+            receipt: result.receipt,
+            assignedAgent: actualAgent,
+            accountNumber: actualAccount,
+            bank: actualBank,
+            ...(actualBank === 'telebirr' && actualAccount ? { phoneNumber: actualAccount } : {})
           });
 
-          // Deduct from connected bank/telebirr account float limit
+          // Deduct from connected bank/telebirr account float limit of the ACTUAL recipient agent
           if (updatedTx) {
-            const hasDigitsOrMask = (str) => str && (/\d/.test(String(str)) || String(str).includes('*'));
-            const actualAccount = (hasDigitsOrMask(result.receipt?.creditedAccount) ? result.receipt.creditedAccount : null)
-              || updatedTx.accountNumber
-              || updatedTx.phoneNumber;
             deductBankDepositLimit(
               updatedTx.platform,
-              updatedTx.bank,
+              actualBank,
               actualAccount,
               parsedAmt,
-              updatedTx.accountNumber || updatedTx.phoneNumber,
-              updatedTx.assignedAgent
+              null,
+              actualAgent
             );
           }
 
@@ -1673,28 +1701,41 @@ router.post('/verify-screenshot', async (req, res) => {
             }
           }
 
+          // Identify actual receiving slot and agent from verified receipt
+          const hasDigitsOrMask = (str) => str && (/\d/.test(String(str)) || String(str).includes('*'));
+          const verifiedIdentifier = (result.matchedAccount && hasDigitsOrMask(result.matchedAccount) ? result.matchedAccount : null)
+            || (hasDigitsOrMask(result.receipt?.creditedAccount) ? result.receipt.creditedAccount : null)
+            || (hasDigitsOrMask(result.receipt?.receiver) ? result.receipt.receiver : null);
+
+          const actualSlot = findVerifiedSlot(currentTx.platform, currentTx.bank, verifiedIdentifier);
+          const actualAgent = (actualSlot && actualSlot.connectedAgent) ? actualSlot.connectedAgent : currentTx.assignedAgent;
+          const actualAccount = (actualSlot && (actualSlot.account || actualSlot.phone)) ? (actualSlot.account || actualSlot.phone) : (verifiedIdentifier || currentTx.accountNumber || currentTx.phoneNumber);
+          const actualBank = (actualSlot && actualSlot.bank) ? actualSlot.bank : currentTx.bank;
+
+          console.log(`[Verify Screenshot] True recipient resolved: Agent '${actualAgent}', Bank '${actualBank}', Account '${actualAccount}' (Display was Agent '${currentTx.assignedAgent}', Bank '${currentTx.bank}', Account '${currentTx.accountNumber || currentTx.phoneNumber}')`);
+
           const updatedTx = updateTxStatus(sessionId, 'verified', {
             transactionId: verifiedTxId,
             amount: parsedAmt,
             verifiedAmount: parsedAmt,
             failReason: null,
             receipt: result.receipt,
-            receiptImage: savedImageUrl
+            receiptImage: savedImageUrl,
+            assignedAgent: actualAgent,
+            accountNumber: actualAccount,
+            bank: actualBank,
+            ...(actualBank === 'telebirr' && actualAccount ? { phoneNumber: actualAccount } : {})
           });
 
-          // Deduct from connected bank/telebirr account float limit
+          // Deduct from connected bank/telebirr account float limit of the ACTUAL recipient agent
           if (updatedTx) {
-            const hasDigitsOrMask = (str) => str && (/\d/.test(String(str)) || String(str).includes('*'));
-            const actualAccount = (hasDigitsOrMask(result.receipt?.creditedAccount) ? result.receipt.creditedAccount : null)
-              || updatedTx.accountNumber
-              || updatedTx.phoneNumber;
             deductBankDepositLimit(
               updatedTx.platform,
-              updatedTx.bank,
+              actualBank,
               actualAccount,
               parsedAmt,
-              updatedTx.accountNumber || updatedTx.phoneNumber,
-              updatedTx.assignedAgent
+              null,
+              actualAgent
             );
           }
 
