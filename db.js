@@ -260,6 +260,14 @@ function updateTxStatus(id, status, updates = {}) {
     fields.push('assignedAgent = ?');
     params.push(updates.assignedAgent ? String(updates.assignedAgent).trim() : null);
   }
+  if (updates.accountNumber !== undefined) {
+    fields.push('accountNumber = ?');
+    params.push(updates.accountNumber ? String(updates.accountNumber).trim() : null);
+  }
+  if (updates.bank !== undefined) {
+    fields.push('bank = ?');
+    params.push(updates.bank ? String(updates.bank).trim().toLowerCase() : null);
+  }
 
   params.push(String(id));
   const sql = `UPDATE transactions SET ${fields.join(', ')} WHERE id = ?`;
