@@ -177,6 +177,152 @@ function normalizePhone(p) {
 }
 
 /**
+ * Account matcher that handles exact matching, masked accounts (e.g. 1000****789, 1****9707, ****9707),
+ * clean digit suffix matching (>= 4 digits), and normalized phone matching (09... vs 2519...).
+ */
+function matchSlotAccount(slotAcc, targetAcc) {
+  if (!slotAcc || !targetAcc) return false;
+  const sRaw = String(slotAcc).trim().toLowerCase();
+  const tRaw = String(targetAcc).trim().toLowerCase();
+  if (sRaw === tRaw) return true;
+
+  // Check phone normalization first
+  const sNormPhone = normalizePhone(sRaw);
+  const tNormPhone = normalizePhone(tRaw);
+  if (sNormPhone && tNormPhone && sNormPhone === tNormPhone) return true;
+
+  const sClean = sRaw.replace(/\D/g, '');
+  const tClean = tRaw.replace(/\D/g, '');
+  if (!sClean || !tClean) return false;
+
+  // Handle masked patterns (e.g. "1000****789", "2519****2277", "09****2277", "1****9707", "****9707")
+  if (tRaw.includes('*')) {
+    const parts = tRaw.split(/\*+/);
+    let prefix = parts[0] ? parts[0].replace(/\D/g, '') : '';
+    let suffix = parts[parts.length - 1] ? parts[parts.length - 1].replace(/\D/g, '') : '';
+
+    if (prefix.startsWith('2519') || prefix === '9' || prefix === '09') prefix = '09';
+    else if (prefix.startsWith('2517') || prefix === '7' || prefix === '07') prefix = '07';
+
+    const checkStr = sNormPhone || sClean;
+    if (prefix && !checkStr.startsWith(prefix)) return false;
+    if (suffix && !checkStr.endsWith(suffix)) return false;
+    return true;
+  }
+
+  if (sRaw.includes('*')) {
+    const parts = sRaw.split(/\*+/);
+    let prefix = parts[0] ? parts[0].replace(/\D/g, '') : '';
+    let suffix = parts[parts.length - 1] ? parts[parts.length - 1].replace(/\D/g, '') : '';
+
+    if (prefix.startsWith('2519') || prefix === '9' || prefix === '09') prefix = '09';
+    else if (prefix.startsWith('2517') || prefix === '7' || prefix === '07') prefix = '07';
+
+    const checkStr = tNormPhone || tClean;
+    if (prefix && !checkStr.startsWith(prefix)) return false;
+    if (suffix && !checkStr.endsWith(suffix)) return false;
+    return true;
+  }
+
+  if (sClean === tClean) return true;
+  if (sClean.length >= 4 && tClean.length >= 4) {
+    return sClean.endsWith(tClean) || tClean.endsWith(sClean);
+  }
+  return false;
+}
+
+/**
+ * Find the exact configured slot and connected agent that received a verified deposit.
+ * Priority: exact match > phone match > masked/suffix match.
+ * Scans preferred bank, bank family (CBE/CBEAgent, eBirr/Siinqee), all other banks, and telebirr.
+ */
+function findVerifiedSlot(platform, preferredBank, creditedIdentifier) {
+  if (!creditedIdentifier) return null;
+  const p = normalizePlatform(platform);
+  let b = String(preferredBank || '').toLowerCase().trim();
+  if (b === 'siinqee' || b === 'sinqee') b = 'ebirr';
+  if (b === 'cbe_agent') b = 'cbeagent';
+
+  const fullData = readJSON('bank_accounts.json') || {};
+  const platBankData = fullData[p] || {};
+  const numData = readJSON('numbers.json') || {};
+  const platNumData = (numData[p] && Array.isArray(numData[p].numbers)) ? numData[p].numbers : [];
+
+  const targetStr = String(creditedIdentifier).trim();
+
+  const testSlots = (slots, bankName) => {
+    if (!Array.isArray(slots) || slots.length === 0) return null;
+
+    // Pass 1: exact match
+    for (const slot of slots) {
+      if (!slot) continue;
+      const acc = slot.account || slot.phone;
+      if (!acc) continue;
+      const sClean = String(acc).replace(/\D/g, '');
+      const tClean = targetStr.replace(/\D/g, '');
+      if (sClean && tClean && sClean === tClean) {
+        return { slot, bank: bankName, account: acc, connectedAgent: slot.connectedAgent || null, matchType: 'exact' };
+      }
+      const sPhone = normalizePhone(acc);
+      const tPhone = normalizePhone(targetStr);
+      if (sPhone && tPhone && sPhone === tPhone) {
+        return { slot, bank: bankName, account: acc, connectedAgent: slot.connectedAgent || null, matchType: 'exact_phone' };
+      }
+    }
+
+    // Pass 2: masked or suffix pattern match
+    for (const slot of slots) {
+      if (!slot) continue;
+      const acc = slot.account || slot.phone;
+      if (!acc) continue;
+      if (matchSlotAccount(acc, targetStr)) {
+        return { slot, bank: bankName, account: acc, connectedAgent: slot.connectedAgent || null, matchType: 'pattern' };
+      }
+    }
+
+    return null;
+  };
+
+  const banksToCheck = [];
+  if (b === 'cbe') {
+    banksToCheck.push('cbe', 'cbeagent');
+  } else if (b === 'cbeagent') {
+    banksToCheck.push('cbeagent', 'cbe');
+  } else if (b === 'ebirr' || b === 'siinqee') {
+    banksToCheck.push('ebirr', 'siinqee');
+  } else if (b && b !== 'telebirr') {
+    banksToCheck.push(b);
+  }
+
+  // Telebirr priority check
+  if (b === 'telebirr') {
+    const teleMatch = testSlots(platNumData, 'telebirr');
+    if (teleMatch) return teleMatch;
+  }
+
+  // Preferred bank and family check
+  for (const bk of banksToCheck) {
+    const match = testSlots(platBankData[bk], bk);
+    if (match) return match;
+  }
+
+  // All other configured banks
+  for (const [bk, slots] of Object.entries(platBankData)) {
+    if (bk === 'bankStatus' || banksToCheck.includes(bk)) continue;
+    const match = testSlots(slots, bk);
+    if (match) return match;
+  }
+
+  // Fallback telebirr numbers check
+  if (b !== 'telebirr') {
+    const teleMatch = testSlots(platNumData, 'telebirr');
+    if (teleMatch) return teleMatch;
+  }
+
+  return null;
+}
+
+/**
  * Deduct deposit amount from connected bank account or agent pool.
  * If account is connected to an agent, deducts from the agent's shared pool.
  */
@@ -191,106 +337,27 @@ function deductBankDepositLimit(platform, bank, accountNumber, amount, fallbackA
   const fullData = readJSON('bank_accounts.json') || {};
   if (!fullData[p]) return null;
 
-  // Account matcher that handles exact matching, masked accounts (e.g. 1000****789), clean digit matching, and normalized phone matching
-  const matchSlotAccount = (slotAcc, targetAcc) => {
-    if (!slotAcc || !targetAcc) return false;
-    const sRaw = String(slotAcc).trim().toLowerCase();
-    const tRaw = String(targetAcc).trim().toLowerCase();
-    if (sRaw === tRaw) return true;
-
-    // Check phone normalization first
-    const sNormPhone = normalizePhone(sRaw);
-    const tNormPhone = normalizePhone(tRaw);
-    if (sNormPhone && tNormPhone && sNormPhone === tNormPhone) return true;
-
-    const sClean = sRaw.replace(/\D/g, '');
-    const tClean = tRaw.replace(/\D/g, '');
-    if (!sClean || !tClean) return false;
-
-    // Handle masked patterns (e.g. "1000****789", "2519****2277", "09****2277")
-    if (tRaw.includes('*')) {
-      const parts = tRaw.split(/\*+/);
-      let prefix = parts[0] ? parts[0].replace(/\D/g, '') : '';
-      let suffix = parts[parts.length - 1] ? parts[parts.length - 1].replace(/\D/g, '') : '';
-
-      if (prefix.startsWith('2519') || prefix === '9' || prefix === '09') prefix = '09';
-      else if (prefix.startsWith('2517') || prefix === '7' || prefix === '07') prefix = '07';
-
-      const checkStr = sNormPhone || sClean;
-      if (prefix && !checkStr.startsWith(prefix)) return false;
-      if (suffix && !checkStr.endsWith(suffix)) return false;
-      return true;
-    }
-
-    if (sRaw.includes('*')) {
-      const parts = sRaw.split(/\*+/);
-      let prefix = parts[0] ? parts[0].replace(/\D/g, '') : '';
-      let suffix = parts[parts.length - 1] ? parts[parts.length - 1].replace(/\D/g, '') : '';
-
-      if (prefix.startsWith('2519') || prefix === '9' || prefix === '09') prefix = '09';
-      else if (prefix.startsWith('2517') || prefix === '7' || prefix === '07') prefix = '07';
-
-      const checkStr = tNormPhone || tClean;
-      if (prefix && !checkStr.startsWith(prefix)) return false;
-      if (suffix && !checkStr.endsWith(suffix)) return false;
-      return true;
-    }
-
-    if (sClean === tClean) return true;
-    if (sClean.length >= 6 && tClean.length >= 6) {
-      return sClean.endsWith(tClean) || tClean.endsWith(sClean);
-    }
-    return false;
-  };
-
   const isCbeFamily = (b === 'cbe' || b === 'cbeagent');
   const isEbirrFamily = (b === 'ebirr' || b === 'siinqee');
   const isTelebirr = (b === 'telebirr');
 
-  // Collect candidate account identifiers
-  const targetAccs = [];
-  if (accountNumber && (/\d/.test(String(accountNumber)) || String(accountNumber).includes('*'))) {
-    targetAccs.push(String(accountNumber).trim());
-  }
-  if (fallbackAccount && (/\d/.test(String(fallbackAccount)) || String(fallbackAccount).includes('*'))) {
-    const cleanFb = String(fallbackAccount).trim();
-    if (!targetAccs.includes(cleanFb)) targetAccs.push(cleanFb);
-  }
-
   let slot = null;
   let slotBank = b;
 
-  // Search by account number / phone
-  for (const target of targetAccs) {
-    if (isTelebirr) {
-      const numData = readJSON('numbers.json') || {};
-      const numSlots = (numData[p] && Array.isArray(numData[p].numbers)) ? numData[p].numbers : [];
-      slot = numSlots.find(n => matchSlotAccount(n.phone, target));
-      if (slot) break;
-    } else {
-      let slots = Array.isArray(fullData[p][b]) ? fullData[p][b] : [];
-      slot = slots.find(a => matchSlotAccount(a.account || a.phone, target));
-      if (slot) break;
+  // Search by verified account / phone using slot resolution
+  if (accountNumber && (/\d/.test(String(accountNumber)) || String(accountNumber).includes('*'))) {
+    const found = findVerifiedSlot(p, b, accountNumber);
+    if (found) {
+      slot = found.slot;
+      slotBank = found.bank;
+    }
+  }
 
-      if (isCbeFamily) {
-        const altBank = (b === 'cbe') ? 'cbeagent' : 'cbe';
-        const altSlots = Array.isArray(fullData[p][altBank]) ? fullData[p][altBank] : [];
-        slot = altSlots.find(a => matchSlotAccount(a.account || a.phone, target));
-        if (slot) {
-          slotBank = altBank;
-          break;
-        }
-      }
-
-      if (isEbirrFamily) {
-        const altBank = (b === 'ebirr') ? 'siinqee' : 'ebirr';
-        const altSlots = Array.isArray(fullData[p][altBank]) ? fullData[p][altBank] : [];
-        slot = altSlots.find(a => matchSlotAccount(a.account || a.phone, target));
-        if (slot) {
-          slotBank = altBank;
-          break;
-        }
-      }
+  if (!slot && fallbackAccount && (/\d/.test(String(fallbackAccount)) || String(fallbackAccount).includes('*'))) {
+    const foundFb = findVerifiedSlot(p, b, fallbackAccount);
+    if (foundFb) {
+      slot = foundFb.slot;
+      slotBank = foundFb.bank;
     }
   }
 
@@ -824,6 +891,8 @@ function getAllAgentPools() {
 
 module.exports = {
   deductBankDepositLimit,
+  findVerifiedSlot,
+  matchSlotAccount,
   increaseBankWithdrawLimit,
   getAgentConnectedAccounts,
   getAllConnectedAccounts,
