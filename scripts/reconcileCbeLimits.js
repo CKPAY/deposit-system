@@ -34,6 +34,7 @@ const { db } = require(path.join(baseDir, 'db'));
 
 const args = process.argv.slice(2);
 const isApply = args.includes('--apply');
+const isForce = args.includes('--force');
 const isAllTime = args.includes('--all-time') || args.includes('--all');
 
 const agentIdx = args.indexOf('--agent');
@@ -244,13 +245,24 @@ verifiedTxs.forEach(tx => {
   let matchedAgent = null;
   let matchReason = '';
 
-  // Direct assignedAgent check
-  if (tx.assignedAgent) {
+  // 1. Account slot match from verified receipt credited account (highest priority)
+  if (credited) {
+    for (const slot of connectedAgentAccounts) {
+      if (matchAccount(credited, slot.account)) {
+        matchedAgent = slot.agent;
+        matchReason = `verified receipt creditedAccount match (${slot.platform}/${slot.bank} ${slot.account})`;
+        break;
+      }
+    }
+  }
+
+  // 2. Direct assignedAgent check
+  if (!matchedAgent && tx.assignedAgent) {
     matchedAgent = normalizeAgent(tx.assignedAgent);
     matchReason = `assignedAgent (${tx.assignedAgent})`;
   }
 
-  // Account slot match
+  // 3. Fallback account slot match
   if (!matchedAgent) {
     for (const slot of connectedAgentAccounts) {
       if (matchAccount(targetAcc, slot.account)) {
@@ -374,7 +386,7 @@ for (const ag of displayAgents) {
   }
 
   // Apply corrections if requested
-  if (isApply && diff > 0) {
+  if (isApply && (diff > 0 || isForce)) {
     console.log(`\n--> [APPLYING] Setting ${ag} remaining float to ${recalculatedRemaining.toLocaleString()} ETB...`);
     if (!bankData.agentLimits) bankData.agentLimits = {};
     bankData.agentLimits[ag] = {
