@@ -275,16 +275,44 @@ function getPlatformBankAccounts(platform = 'jember', bank = 'cbe') {
   let b = String(bank || 'cbe').toLowerCase();
   if (b === 'siinqee' || b === 'sinqee') b = 'ebirr';
   const raw = readJSON('bank_accounts.json') || {};
-  if (raw[p] && Array.isArray(raw[p][b])) {
-    return raw[p][b];
+  const platData = raw[p] || {};
+
+  if (b === 'ebirr') {
+    const listEbirr = Array.isArray(platData.ebirr) ? platData.ebirr : [];
+    const listSiinqee = Array.isArray(platData.siinqee) ? platData.siinqee : [];
+    const activeE = listEbirr.filter(a => a.active !== false && a.account && a.account.trim());
+    const activeS = listSiinqee.filter(a => a.active !== false && a.account && a.account.trim());
+    if (activeE.length > 0 && activeS.length === 0) return listEbirr;
+    if (activeS.length > 0 && activeE.length === 0) return listSiinqee;
+    if (activeE.length > 0 && activeS.length > 0) return [...listEbirr, ...listSiinqee];
+    return listEbirr.length > 0 ? listEbirr : listSiinqee;
   }
-  if (b === 'ebirr' && raw[p] && Array.isArray(raw[p]['siinqee'])) {
-    return raw[p]['siinqee'];
+
+  if (platData[b] && Array.isArray(platData[b])) {
+    return platData[b];
   }
   return [];
 }
 
 function getActiveBankAccounts(platform = 'jember', bank = 'cbe') {
+  const p = normalizePlatform(platform);
+  let b = String(bank || 'cbe').toLowerCase();
+  if (b === 'siinqee' || b === 'sinqee') b = 'ebirr';
+
+  const raw = readJSON('bank_accounts.json') || {};
+  const platData = raw[p] || {};
+
+  if (b === 'ebirr') {
+    const listEbirr = Array.isArray(platData.ebirr) ? platData.ebirr : [];
+    const listSiinqee = Array.isArray(platData.siinqee) ? platData.siinqee : [];
+    const combined = [...listEbirr, ...listSiinqee];
+    return Array.from(new Set(
+      combined
+        .filter(a => a.active !== false && a.account && a.account.trim())
+        .map(a => a.account.trim())
+    ));
+  }
+
   let list = getPlatformBankAccounts(platform, bank);
   let active = list.filter(a => a.active !== false && a.account && a.account.trim()).map(a => a.account.trim());
   if ((bank === 'cbeagent' || bank === 'cbe_agent') && active.length === 0) {
@@ -369,9 +397,11 @@ function extractTransactionId(text) {
     // Direct v2- or receipt hash code (e.g. v2-hfHCxFSmqtLtX7liH8Qm)
     if (/^v2-[A-Za-z0-9_-]{8,40}$/i.test(str)) return str;
 
-    // Direct alphanumeric code (Telebirr, CBE FT, BoA, etc.)
+    // Direct alphanumeric code (Telebirr, CBE FT, BoA, eBirr token, etc.)
     if (/^[A-Za-z0-9_-]{8,35}$/.test(str)) {
-      return str.startsWith('v2-') ? str : str.toUpperCase();
+      if (str.startsWith('v2-')) return str;
+      if (str.length >= 16 && /[a-z]/.test(str) && /[A-Z]/.test(str)) return str;
+      return str.toUpperCase();
     }
   }
 
@@ -383,11 +413,13 @@ function extractTransactionId(text) {
 
   // 2. Multilingual keywords for Ethiopian Languages & English (Txn ID, Transaction ID, Ref, etc.)
   const matchKeyword = str.match(
-    /(?:transaction\s+(?:number\s+is|id|number|no|code)|txn\s*id|txn|txid|ref(?:erence)?(?:\s*no\.?|\s*number|\s*id)?|receipt(?:\s*no\.?|\s*number|\s*id)?|reciept(?:\s*no\.?|\s*number|\s*id)?|የግብይት\s*(?:ቁጥር(?:ዎ)?|መለያ)?|መለያ\s*ቁጥር|የደረሰኝ\s*ቁጥር|lakk(?:oofsa)?\.?\s*(?:daldala(?:a| keessanii)?|dabarsaa|nagahee|ajajaa)?|ቁጽሪ\s*(?:ንግዲ(?:ኹም)?|ትራንዛክሽን|ደረሰኝ)?|lambarka\s*(?:macaamilka|rasiidka|tixraaca)?)\s*[:፡=]?\s*([A-Za-z0-9_-]{8,40})/iu
+    /(?:transaction\s+(?:number\s+is|id|number|no|code)|txn\s*id|txn|txid|\bId\b|ref(?:erence)?(?:\s*no\.?|\s*number|\s*id)?|receipt(?:\s*no\.?|\s*number|\s*id)?|reciept(?:\s*no\.?|\s*number|\s*id)?|የግብይት\s*(?:ቁጥር(?:ዎ)?|መለያ)?|መለያ\s*ቁጥር|የደረሰኝ\s*ቁጥር|lakk(?:oofsa)?\.?\s*(?:daldala(?:a| keessanii)?|dabarsaa|nagahee|ajajaa)?|ቁጽሪ\s*(?:ንግዲ(?:ኹም)?|ትራንዛክሽን|ደረሰኝ)?|lambarka\s*(?:macaamilka|rasiidka|tixraaca)?)\s*[:፡=]?\s*([A-Za-z0-9_-]{8,40})/iu
   );
   if (matchKeyword && matchKeyword[1]) {
     const val = matchKeyword[1].trim();
-    return val.startsWith('v2-') ? val : val.toUpperCase();
+    if (val.startsWith('v2-')) return val;
+    if (val.length >= 16 && /[a-z]/.test(val) && /[A-Z]/.test(val)) return val;
+    return val.toUpperCase();
   }
 
   // 3. CBE Birr / Bank URL with query param ?TID=... (e.g. cbepay1.cbe.com.et/aureceipt?TID=DJI21S46O36&PH=...)
@@ -441,7 +473,9 @@ function extractTransactionId(text) {
     const clean = w.replace(/[^A-Za-z0-9_-]/g, '');
     if (BLACKLIST.has(clean.toUpperCase())) continue;
     if (clean.length >= 8 && clean.length <= 25 && /[A-Za-z]/.test(clean) && /[0-9]/.test(clean)) {
-      return clean.startsWith('v2-') ? clean : clean.toUpperCase();
+      if (clean.startsWith('v2-')) return clean;
+      if (clean.length >= 16 && /[a-z]/.test(clean) && /[A-Z]/.test(clean)) return clean;
+      return clean.toUpperCase();
     }
   }
 
@@ -1441,11 +1475,19 @@ router.post('/verify', (req, res) => {
     let result = null;
 
     // Direct eBirr Receipt Link / Token extraction (instant verification without verify.et queue)
+    // NOTE: eBirr tokens are case-sensitive (e.g. DTG1wTiGTSr-e52e51tRfA). cleanTxId preserves case for mixed-case tokens.
     const rawInput = String(transactionId || '');
     const ebirrUrlMatch = rawInput.match(/https?:\/\/(?:[a-zA-Z0-9-]+\.)*ebirr\.com\/[^\s]+/i);
-    const isEbirrToken = (bank === 'ebirr' || bank === 'siinqee') && (ebirrUrlMatch || /^[A-Za-z0-9_-]{16,40}$/.test(cleanTxId));
+    const isEbirrToken = (bank === 'ebirr' || bank === 'siinqee') && (
+      ebirrUrlMatch ||
+      /^[A-Za-z0-9_-]{16,40}$/.test(cleanTxId) ||
+      /^[A-Za-z0-9_-]{16,40}$/.test(rawInput.trim())
+    );
     if (isEbirrToken) {
-      const targetTokenOrUrl = ebirrUrlMatch ? ebirrUrlMatch[0] : cleanTxId;
+      // Prefer: raw URL > original rawInput token (case-preserved) > cleanTxId
+      const targetTokenOrUrl = ebirrUrlMatch
+        ? ebirrUrlMatch[0]
+        : (/^[A-Za-z0-9_-]{8,50}$/.test(rawInput.trim()) ? rawInput.trim() : cleanTxId);
       console.log('[Verify Route] Attempting direct eBirr receipt verification for:', targetTokenOrUrl);
       result = await verifyEbirrReceiptFromUrl(targetTokenOrUrl, platform);
       console.log('[Verify Route] Direct eBirr outcome:', result?.success, result?.receipt?.transactionId);
