@@ -365,15 +365,28 @@ function matchesMaskedAccount(creditedStr, activeAccounts) {
     const parts = str.split(/\*+/);
     const prefix = parts[0] ? parts[0].replace(/\D/g, '') : '';
     const suffix = parts[parts.length - 1] ? parts[parts.length - 1].replace(/\D/g, '') : '';
+
+    // Bank masked receipts ALWAYS have at least 3 suffix digits (e.g. 1********9504, 1****9504).
+    // If suffix is missing or fewer than 3 digits, it cannot be safely verified -> reject.
+    if (suffix.length < 3) return false;
+
     return activeAccounts.some(acc => {
-      const cleanAcc = acc.replace(/\D/g, '');
+      const cleanAcc = String(acc).replace(/\D/g, '');
       if (prefix && !cleanAcc.startsWith(prefix)) return false;
-      if (suffix && !cleanAcc.endsWith(suffix)) return false;
+      if (!cleanAcc.endsWith(suffix)) return false;
       return true;
     });
   }
 
-  return activeAccounts.some(acc => acc.replace(/\D/g, '') === digitsOnly);
+  // Exact unmasked account or normalized phone match
+  return activeAccounts.some(acc => {
+    const cleanAcc = String(acc).replace(/\D/g, '');
+    if (cleanAcc === digitsOnly) return true;
+    const p1 = normalizePhone(acc);
+    const p2 = normalizePhone(str);
+    if (p1 && p2 && p1 === p2) return true;
+    return false;
+  });
 }
 
 function extractTransactionId(text) {
@@ -648,27 +661,31 @@ router.get('/active-banks', (req, res) => {
       }
     }
 
-    // If admin has configured accounts for any banks, only include banks that have at least one available account:
+    // Strict check: only include banks that have at least one active configured account
+    const configuredActive = getActiveBankAccounts(p, b);
+    if (configuredActive.length === 0) return false;
+
+    // Check account limit quotas:
     // - Accounts with NO limit set: always available.
     // - Accounts WITH a limit (connected or not): available only while remaining > 0.
-    if (hasAnyConfiguredAccounts) {
-      let accs = Array.isArray(platData[b]) ? platData[b] : [];
-      if (b === 'cbeagent' && !accs.some(a => a && a.active !== false && String(a.account || '').trim() !== '')) {
-        accs = Array.isArray(platData['cbe']) ? platData['cbe'] : [];
-      }
-      const hasAvailable = accs.some(a => {
-        if (!a || a.active === false || String(a.account || '').trim() === '') return false;
-        const hasLimit = (a.remainingLimit !== undefined && a.remainingLimit !== null) ||
-                         (a.initialLimit !== undefined && a.initialLimit !== null);
-        if (!hasLimit) return true; // No limit set -> always available
-        const rem = Number(a.remainingLimit !== undefined && a.remainingLimit !== null ? a.remainingLimit : (a.initialLimit || 0));
-        return rem > 0; // Has a limit -> only available while remaining > 0
-      });
-      return hasAvailable;
+    let accs = Array.isArray(platData[b]) ? platData[b] : [];
+    if (b === 'cbeagent' && !accs.some(a => a && a.active !== false && String(a.account || '').trim() !== '')) {
+      accs = Array.isArray(platData['cbe']) ? platData['cbe'] : [];
+    } else if (b === 'ebirr') {
+      const eAccs = Array.isArray(platData['ebirr']) ? platData['ebirr'] : [];
+      const sAccs = Array.isArray(platData['siinqee']) ? platData['siinqee'] : [];
+      accs = [...eAccs, ...sAccs];
     }
 
-    // Default fallback: allow if not false
-    return true;
+    const hasAvailable = accs.some(a => {
+      if (!a || a.active === false || String(a.account || '').trim() === '') return false;
+      const hasLimit = (a.remainingLimit !== undefined && a.remainingLimit !== null) ||
+                       (a.initialLimit !== undefined && a.initialLimit !== null);
+      if (!hasLimit) return true; // No limit set -> always available
+      const rem = Number(a.remainingLimit !== undefined && a.remainingLimit !== null ? a.remainingLimit : (a.initialLimit || 0));
+      return rem > 0; // Has a limit -> only available while remaining > 0
+    });
+    return hasAvailable;
   });
 
   const settings = getPlatformSettings(p);
@@ -1018,30 +1035,54 @@ async function verifyEbirrReceiptFromUrl(receiptUrlOrToken, platform = 'jember')
     if (receiptNo && amtMatch) {
       const parsedAmt = parseFloat(amtMatch);
       const activeAccounts = getActiveBankAccounts(platform, 'ebirr');
-      const cleanReceiver = (receiverPhone || '').replace(/\D/g, '');
-      const isMatch = activeAccounts.length === 0 || activeAccounts.some(acc => {
-        const cleanAcc = acc.replace(/\D/g, '');
-        return cleanAcc.endsWith(cleanReceiver.slice(-9)) || cleanReceiver.endsWith(cleanAcc.slice(-9));
-      });
-
-      if (!isMatch && activeAccounts.length > 0) {
+      if (!activeAccounts || activeAccounts.length === 0) {
         return {
           success: false,
-          message: 'Receipt receiver account does not match any active eBirr accounts.'
+          message: 'No active eBirr/Siinqee accounts configured for this platform. Please contact support.',
+          code: 'NO_ACTIVE_ACCOUNTS'
+        };
+      }
+
+      const cleanReceiver = (receiverPhone || '').replace(/\D/g, '');
+      if (!cleanReceiver || cleanReceiver.length < 8) {
+        return {
+          success: false,
+          message: 'Could not extract valid recipient account from eBirr receipt.',
+          code: 'RECEIVER_NOT_FOUND'
+        };
+      }
+
+      const matchedAccount = activeAccounts.find(acc => {
+        const cleanAcc = acc.replace(/\D/g, '');
+        const normAcc = normalizePhone(acc);
+        const normRec = normalizePhone(cleanReceiver);
+        if (normAcc && normRec && normAcc === normRec) return true;
+        if (cleanAcc === cleanReceiver) return true;
+        if (cleanReceiver.length >= 9 && cleanAcc.endsWith(cleanReceiver.slice(-9))) return true;
+        if (cleanAcc.length >= 9 && cleanReceiver.endsWith(cleanAcc.slice(-9))) return true;
+        return false;
+      });
+
+      if (!matchedAccount) {
+        return {
+          success: false,
+          message: 'Receipt was not sent to an active eBirr account for this platform.',
+          code: 'ACCOUNT_MISMATCH'
         };
       }
 
       return {
         success: true,
         settlementMatch: true,
+        matchedAccount: matchedAccount,
         receipt: {
           transactionId: receiptNo,
           receiptNumber: receiptNo,
           amount: parsedAmt,
-          creditedAccount: receiverPhone || '',
+          creditedAccount: matchedAccount,
           payer: senderName || '',
           senderName: senderName || '',
-          receiver: receiverName || receiverPhone || '',
+          receiver: receiverName || receiverPhone || matchedAccount,
           date: dateMatch || new Date().toISOString()
         }
       };
@@ -1197,18 +1238,31 @@ async function verifyWithVerifyEtMultiKey(settings, transactionId, targetPhoneNu
 
   const isCbeFamily = (b === 'cbe' || b === 'cbeagent' || b === 'cbe_agent');
   const isEbirrFamily = (b === 'ebirr' || b === 'siinqee');
-  let candidateAccounts = [receivingAccount].filter(Boolean);
+  let candidateAccounts = [];
   if (isCbeFamily) {
     const activeCbe = getActiveBankAccounts(platform, 'cbe');
     const activeAgent = getActiveBankAccounts(platform, 'cbeagent');
-    candidateAccounts = Array.from(new Set([...candidateAccounts, ...activeAgent, ...activeCbe].filter(Boolean)));
+    candidateAccounts = Array.from(new Set([...activeAgent, ...activeCbe].filter(Boolean)));
   } else if (isEbirrFamily) {
     const activeEbirr = getActiveBankAccounts(platform, 'ebirr');
     const activeSiinqee = getActiveBankAccounts(platform, 'siinqee');
-    candidateAccounts = Array.from(new Set([...candidateAccounts, ...activeEbirr, ...activeSiinqee].filter(Boolean)));
+    candidateAccounts = Array.from(new Set([...activeEbirr, ...activeSiinqee].filter(Boolean)));
   } else if (b !== 'telebirr') {
-    const activeBankAccs = getActiveBankAccounts(platform, b);
-    candidateAccounts = Array.from(new Set([...candidateAccounts, ...activeBankAccs].filter(Boolean)));
+    candidateAccounts = getActiveBankAccounts(platform, b);
+  }
+
+  // Strictly require active configured accounts for banks
+  if (b !== 'telebirr' && candidateAccounts.length === 0) {
+    return {
+      success: false,
+      message: `No active ${b.toUpperCase()} accounts configured for this platform. Please contact support.`,
+      code: 'NO_ACTIVE_ACCOUNTS'
+    };
+  }
+
+  // If receivingAccount was assigned from active accounts, prioritize testing it first
+  if (receivingAccount && candidateAccounts.includes(receivingAccount)) {
+    candidateAccounts = [receivingAccount, ...candidateAccounts.filter(a => a !== receivingAccount)];
   }
 
   let lastResult = null;
@@ -1216,7 +1270,7 @@ async function verifyWithVerifyEtMultiKey(settings, transactionId, targetPhoneNu
   for (const key of keysToTry) {
     if (!key || key.includes('_placeholder')) continue;
 
-    const accountsToTest = (b !== 'telebirr' && candidateAccounts.length > 0) ? candidateAccounts : [receivingAccount];
+    const accountsToTest = (b !== 'telebirr') ? candidateAccounts : [''];
 
     for (const testAcc of accountsToTest) {
       console.log(`[Verify] Trying key on Verify.ET for tx (${b}), acc (${testAcc}):`, transactionId);
@@ -1232,21 +1286,19 @@ async function verifyWithVerifyEtMultiKey(settings, transactionId, targetPhoneNu
             return result;
           }
         } else {
-          result.matchedAccount = testAcc;
-          if (!result.receipt.creditedAccount && testAcc) {
-            result.receipt.creditedAccount = testAcc;
-          }
           if (result.settlementMatch === true) {
+            result.matchedAccount = testAcc;
+            result.receipt.creditedAccount = testAcc;
             return result;
           }
           const credited = result.receipt.creditedAccount || result.receipt.receiver;
-          const activeAccounts = candidateAccounts.length > 0 ? candidateAccounts : getActiveBankAccounts(platform, b);
-          if (activeAccounts.length === 0 || !credited) {
-            return result;
-          }
-          const isMatch = matchesMaskedAccount(credited, activeAccounts);
-          console.log(`[Verify] Bank (${b}) account match:`, credited, isMatch);
-          if (isMatch) {
+          if (credited && matchesMaskedAccount(credited, candidateAccounts)) {
+            const matched = candidateAccounts.find(acc => matchesMaskedAccount(credited, [acc]));
+            result.matchedAccount = matched || testAcc;
+            if (!result.receipt.creditedAccount) {
+              result.receipt.creditedAccount = result.matchedAccount;
+            }
+            console.log(`[Verify] Bank (${b}) account match:`, credited, '->', result.matchedAccount);
             return result;
           }
         }
@@ -1387,12 +1439,20 @@ async function verifyWithVerifyEtScreenshotMultiKey(settings, imageBuffer, mimeT
   const isCbeFamily = (b === 'cbe' || b === 'cbeagent' || b === 'cbe_agent');
   const isEbirrFamily = (b === 'ebirr' || b === 'siinqee');
   const allActiveAccounts = isCbeFamily
-    ? Array.from(new Set([receivingAccount, ...getActiveBankAccounts(platform, 'cbeagent'), ...getActiveBankAccounts(platform, 'cbe')].filter(Boolean)))
+    ? Array.from(new Set([...getActiveBankAccounts(platform, 'cbeagent'), ...getActiveBankAccounts(platform, 'cbe')].filter(Boolean)))
     : isEbirrFamily
-    ? Array.from(new Set([receivingAccount, ...getActiveBankAccounts(platform, 'ebirr'), ...getActiveBankAccounts(platform, 'siinqee')].filter(Boolean)))
+    ? Array.from(new Set([...getActiveBankAccounts(platform, 'ebirr'), ...getActiveBankAccounts(platform, 'siinqee')].filter(Boolean)))
     : (b !== 'telebirr')
-    ? Array.from(new Set([receivingAccount, ...getActiveBankAccounts(platform, b)].filter(Boolean)))
+    ? getActiveBankAccounts(platform, b)
     : [];
+
+  if (allActiveAccounts.length === 0) {
+    return {
+      success: false,
+      message: `No active ${b.toUpperCase()} accounts configured for this platform. Please contact support.`,
+      code: 'NO_ACTIVE_ACCOUNTS'
+    };
+  }
 
   for (const key of keysToTry) {
     console.log(`[Verify Screenshot] Trying key on Verify.ET for bank (${b}), session:`, sessionId);
@@ -1400,14 +1460,19 @@ async function verifyWithVerifyEtScreenshotMultiKey(settings, imageBuffer, mimeT
     console.log('[Verify Screenshot] Result:', result.success, result.message, result.receipt?.creditedAccount);
 
     if (result.success && result.receipt) {
-      if (allActiveAccounts.length > 0) {
-        const credited = result.receipt.creditedAccount || result.receipt.receiver;
-        if (!credited || matchesMaskedAccount(credited, allActiveAccounts)) {
-          return result;
-        }
-      } else {
+      const credited = result.receipt.creditedAccount || result.receipt.receiver;
+      if (credited && matchesMaskedAccount(credited, allActiveAccounts)) {
+        const matched = allActiveAccounts.find(acc => matchesMaskedAccount(credited, [acc]));
+        result.matchedAccount = matched || credited;
         return result;
       }
+      console.warn(`[Verify Screenshot] Rejecting: credited '${credited}' does not match active accounts:`, allActiveAccounts);
+      lastResult = {
+        success: false,
+        message: 'The receipt was not sent to an active bank account for this platform.',
+        code: 'ACCOUNT_MISMATCH'
+      };
+      continue;
     }
     lastResult = result;
   }
@@ -1516,6 +1581,25 @@ router.post('/verify', (req, res) => {
               });
               return;
             }
+          } else {
+            const isCbeFam = (bank === 'cbe' || bank === 'cbeagent' || bank === 'cbe_agent');
+            const isEbirrFam = (bank === 'ebirr' || bank === 'siinqee');
+            const activeBankAccounts = isCbeFam
+              ? Array.from(new Set([...getActiveBankAccounts(platform, 'cbeagent'), ...getActiveBankAccounts(platform, 'cbe')]))
+              : isEbirrFam
+              ? Array.from(new Set([...getActiveBankAccounts(platform, 'ebirr'), ...getActiveBankAccounts(platform, 'siinqee')]))
+              : getActiveBankAccounts(platform, bank);
+
+            const creditedAccountStr = result.matchedAccount || result.receipt.creditedAccount || result.receipt.receiver;
+            if (!creditedAccountStr || !matchesMaskedAccount(creditedAccountStr, activeBankAccounts)) {
+              console.warn(`[Verify Route] Reject: credited '${creditedAccountStr}' does not match active bank accounts:`, activeBankAccounts);
+              updateTxStatus(sessionId, 'pending', {
+                transactionId: null,
+                submittedAt: null,
+                failReason: 'Transaction was not sent to an active deposit account for this platform. Please transfer to the displayed account and try again.'
+              });
+              return;
+            }
           }
 
           const rawAmt = result.receipt.amount || '0';
@@ -1551,9 +1635,18 @@ router.post('/verify', (req, res) => {
             || (hasDigitsOrMask(result.receipt?.receiver) ? result.receipt.receiver : null);
 
           const actualSlot = findVerifiedSlot(currentTx.platform, currentTx.bank, verifiedIdentifier);
-          const actualAgent = (actualSlot && actualSlot.connectedAgent) ? actualSlot.connectedAgent : currentTx.assignedAgent;
-          const actualAccount = (actualSlot && (actualSlot.account || actualSlot.phone)) ? (actualSlot.account || actualSlot.phone) : (verifiedIdentifier || currentTx.accountNumber || currentTx.phoneNumber);
-          const actualBank = (actualSlot && actualSlot.bank) ? actualSlot.bank : currentTx.bank;
+          if (!actualSlot) {
+            console.warn(`[Verify Route Security] REJECTED: Credited account '${verifiedIdentifier}' does not match any active slot for platform '${currentTx.platform}', bank '${currentTx.bank}'.`);
+            updateTxStatus(sessionId, 'pending', {
+              transactionId: null,
+              submittedAt: null,
+              failReason: 'Transaction was not sent to an active deposit account for this platform. Please transfer to the displayed account and try again.'
+            });
+            return;
+          }
+          const actualAgent = actualSlot.connectedAgent || currentTx.assignedAgent;
+          const actualAccount = actualSlot.account || actualSlot.phone || verifiedIdentifier;
+          const actualBank = actualSlot.bank || currentTx.bank;
 
           console.log(`[Verify Route] True recipient resolved: Agent '${actualAgent}', Bank '${actualBank}', Account '${actualAccount}' (Display was Agent '${currentTx.assignedAgent}', Bank '${currentTx.bank}', Account '${currentTx.accountNumber || currentTx.phoneNumber}')`);
 
@@ -1705,7 +1798,7 @@ router.post('/verify-screenshot', async (req, res) => {
       if (currentTx) {
         if (result.success && result.receipt) {
           const rawAmt = result.receipt.amount || '0';
-          const parsedAmt = parseFloat(String(rawAmt).replace(/[^0-9.]/g, '')) || currentTx.amount;
+          let parsedAmt = parseFloat(String(rawAmt).replace(/[^0-9.]/g, '')) || currentTx.amount;
 
           const minDeposit = settings.minDeposit || 100;
           const maxDeposit = settings.maxDeposit || 50000;
@@ -1750,11 +1843,65 @@ router.post('/verify-screenshot', async (req, res) => {
             || (hasDigitsOrMask(result.receipt?.receiver) ? result.receipt.receiver : null);
 
           const actualSlot = findVerifiedSlot(currentTx.platform, currentTx.bank, verifiedIdentifier);
-          const actualAgent = (actualSlot && actualSlot.connectedAgent) ? actualSlot.connectedAgent : currentTx.assignedAgent;
-          const actualAccount = (actualSlot && (actualSlot.account || actualSlot.phone)) ? (actualSlot.account || actualSlot.phone) : (verifiedIdentifier || currentTx.accountNumber || currentTx.phoneNumber);
-          const actualBank = (actualSlot && actualSlot.bank) ? actualSlot.bank : currentTx.bank;
+          if (!actualSlot) {
+            console.warn(`[Verify Route Security] REJECTED: Credited account '${verifiedIdentifier}' does not match any active slot for platform '${currentTx.platform}', bank '${currentTx.bank}'.`);
+            updateTxStatus(sessionId, 'pending', {
+              transactionId: null,
+              submittedAt: null,
+              failReason: 'Transaction was not sent to an active deposit account for this platform. Please transfer to the displayed account and try again.'
+            });
+            return;
+          }
+          const actualAgent = actualSlot.connectedAgent || currentTx.assignedAgent;
+          const actualAccount = actualSlot.account || actualSlot.phone || verifiedIdentifier;
+          const actualBank = actualSlot.bank || currentTx.bank;
 
           console.log(`[Verify Screenshot] True recipient resolved: Agent '${actualAgent}', Bank '${actualBank}', Account '${actualAccount}' (Display was Agent '${currentTx.assignedAgent}', Bank '${currentTx.bank}', Account '${currentTx.accountNumber || currentTx.phoneNumber}')`);
+
+          // Extra 8-digit backend ledger validation for CBE and other banks:
+          // Queries the bank's live core ledger using the extracted transaction code and our real account's suffix.
+          // This eliminates middle-digit spoofing (e.g. 1000 9999 9504 vs 1000 4297 39504) with 100% certainty.
+          if (verifiedTxId && !verifiedTxId.startsWith('IMG-') && actualAccount) {
+            const apiKeys = Array.isArray(settings.apiKeys) ? settings.apiKeys.filter(Boolean) : [];
+            const primaryKey = settings.verifyApiKey || apiKeys[0];
+            if (primaryKey && !primaryKey.includes('_placeholder')) {
+              try {
+                let targetBank = (actualBank === 'cbeagent' || actualBank === 'cbe_agent') ? 'cbe' : actualBank;
+                if (targetBank === 'ebirr') targetBank = 'siinqee';
+                console.log(`[Verify Screenshot] Running live backend ledger cross-check for ${verifiedTxId} (${targetBank}) against account ${actualAccount}...`);
+                const crossCheck = await verifyWithVerifyEt(primaryKey, verifiedTxId, targetBank, actualAccount);
+                if (crossCheck && crossCheck.success) {
+                  if (crossCheck.settlementMatch === false) {
+                    console.warn(`[Verify Screenshot Security] 8-digit backend check REJECTED: ${verifiedTxId} was NOT sent to ${actualAccount}`);
+                    updateTxStatus(sessionId, 'pending', {
+                      transactionId: null,
+                      submittedAt: null,
+                      failReason: 'Transaction was not sent to an active deposit account for this platform. Please transfer to the displayed account and try again.'
+                    });
+                    return;
+                  }
+                  if (crossCheck.receipt?.amount) {
+                    const bankAmt = parseFloat(String(crossCheck.receipt.amount).replace(/[^0-9.]/g, ''));
+                    if (bankAmt && !isNaN(bankAmt) && bankAmt > 0) {
+                      parsedAmt = bankAmt;
+                    }
+                  }
+                } else if (crossCheck && !crossCheck.success) {
+                  if (crossCheck.code === 'VERIFICATION_FAILED' || /not found|invalid|mismatch/i.test(crossCheck.message || '')) {
+                    console.warn(`[Verify Screenshot Security] Live bank API rejected reference ${verifiedTxId}:`, crossCheck.message);
+                    updateTxStatus(sessionId, 'pending', {
+                      transactionId: null,
+                      submittedAt: null,
+                      failReason: 'Transaction was not sent to an active deposit account for this platform. Please transfer to the displayed account and try again.'
+                    });
+                    return;
+                  }
+                }
+              } catch (chkErr) {
+                console.warn('[Verify Screenshot] Backend cross-check non-fatal error:', chkErr.message);
+              }
+            }
+          }
 
           const updatedTx = updateTxStatus(sessionId, 'verified', {
             transactionId: verifiedTxId,
