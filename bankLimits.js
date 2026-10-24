@@ -201,12 +201,15 @@ function matchSlotAccount(slotAcc, targetAcc) {
     let prefix = parts[0] ? parts[0].replace(/\D/g, '') : '';
     let suffix = parts[parts.length - 1] ? parts[parts.length - 1].replace(/\D/g, '') : '';
 
+    // Masked patterns MUST have at least 3 suffix digits (e.g. 9504, 5309). Suffixes under 3 digits cannot be trusted.
+    if (suffix.length < 3) return false;
+
     if (prefix.startsWith('2519') || prefix === '9' || prefix === '09') prefix = '09';
     else if (prefix.startsWith('2517') || prefix === '7' || prefix === '07') prefix = '07';
 
     const checkStr = sNormPhone || sClean;
     if (prefix && !checkStr.startsWith(prefix)) return false;
-    if (suffix && !checkStr.endsWith(suffix)) return false;
+    if (!checkStr.endsWith(suffix)) return false;
     return true;
   }
 
@@ -215,16 +218,25 @@ function matchSlotAccount(slotAcc, targetAcc) {
     let prefix = parts[0] ? parts[0].replace(/\D/g, '') : '';
     let suffix = parts[parts.length - 1] ? parts[parts.length - 1].replace(/\D/g, '') : '';
 
+    if (suffix.length < 3) return false;
+
     if (prefix.startsWith('2519') || prefix === '9' || prefix === '09') prefix = '09';
     else if (prefix.startsWith('2517') || prefix === '7' || prefix === '07') prefix = '07';
 
     const checkStr = tNormPhone || tClean;
     if (prefix && !checkStr.startsWith(prefix)) return false;
-    if (suffix && !checkStr.endsWith(suffix)) return false;
+    if (!checkStr.endsWith(suffix)) return false;
     return true;
   }
 
   if (sClean === tClean) return true;
+
+  // If BOTH are full bank accounts / phones (>= 8 digits), they MUST match exactly!
+  // Suffix matching only applies when target or slot is a short suffix (4 to 6 digits).
+  if (sClean.length >= 8 && tClean.length >= 8) {
+    return false;
+  }
+
   if (sClean.length >= 4 && tClean.length >= 4) {
     return sClean.endsWith(tClean) || tClean.endsWith(sClean);
   }
@@ -255,9 +267,9 @@ function findVerifiedSlot(platform, preferredBank, creditedIdentifier) {
 
     // Pass 1: exact match
     for (const slot of slots) {
-      if (!slot) continue;
+      if (!slot || slot.active === false) continue;
       const acc = slot.account || slot.phone;
-      if (!acc) continue;
+      if (!acc || !String(acc).trim()) continue;
       const sClean = String(acc).replace(/\D/g, '');
       const tClean = targetStr.replace(/\D/g, '');
       if (sClean && tClean && sClean === tClean) {
@@ -272,9 +284,9 @@ function findVerifiedSlot(platform, preferredBank, creditedIdentifier) {
 
     // Pass 2: masked or suffix pattern match
     for (const slot of slots) {
-      if (!slot) continue;
+      if (!slot || slot.active === false) continue;
       const acc = slot.account || slot.phone;
-      if (!acc) continue;
+      if (!acc || !String(acc).trim()) continue;
       if (matchSlotAccount(acc, targetStr)) {
         return { slot, bank: bankName, account: acc, connectedAgent: slot.connectedAgent || null, matchType: 'pattern' };
       }
