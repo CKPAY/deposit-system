@@ -568,6 +568,8 @@ function getWithdrawalStats(platform = 'all', timestamps = {}, { assignedAgent =
   const whereClause = conditions.length > 0 ? (' WHERE ' + conditions.join(' AND ')) : '';
 
   const todayStart = Number(timestamps.todayStart) || 0;
+  const yesterdayStart = Number(timestamps.yesterdayStart) || 0;
+  const yesterdayEnd = Number(timestamps.yesterdayEnd) || 0;
   const weekStart = Number(timestamps.weekStart) || 0;
   const lastWeekStart = Number(timestamps.lastWeekStart) || 0;
   const lastWeekEnd = Number(timestamps.lastWeekEnd) || 0;
@@ -588,10 +590,12 @@ function getWithdrawalStats(platform = 'all', timestamps = {}, { assignedAgent =
       COUNT(CASE WHEN status = 'rejected' ${timeFilterClause} THEN 1 END) as rejectedCount,
       SUM(CASE WHEN status = 'completed' THEN amount ELSE 0 END) as totalPaidETB,
       SUM(CASE WHEN status = 'completed' AND processedAt >= ${todayStart} THEN amount ELSE 0 END) as todayPaidETB,
+      SUM(CASE WHEN status = 'completed' AND processedAt >= ${yesterdayStart} AND processedAt <= ${yesterdayEnd} THEN amount ELSE 0 END) as yesterdayPaidETB,
       SUM(CASE WHEN status = 'completed' AND processedAt >= ${weekStart} THEN amount ELSE 0 END) as weekPaidETB,
       SUM(CASE WHEN status = 'completed' AND processedAt >= ${lastWeekStart} AND processedAt <= ${lastWeekEnd} THEN amount ELSE 0 END) as lastWeekPaidETB,
       SUM(CASE WHEN status = 'completed' AND processedAt >= ${monthStart} THEN amount ELSE 0 END) as monthPaidETB,
       COUNT(CASE WHEN status = 'completed' AND processedAt >= ${todayStart} THEN 1 END) as todayCount,
+      COUNT(CASE WHEN status = 'completed' AND processedAt >= ${yesterdayStart} AND processedAt <= ${yesterdayEnd} THEN 1 END) as yesterdayCount,
       COUNT(CASE WHEN status = 'completed' AND processedAt >= ${weekStart} THEN 1 END) as weekCount,
       COUNT(CASE WHEN status = 'completed' AND processedAt >= ${lastWeekStart} AND processedAt <= ${lastWeekEnd} THEN 1 END) as lastWeekCount,
       COUNT(CASE WHEN status = 'completed' AND processedAt >= ${monthStart} THEN 1 END) as monthCount
@@ -608,10 +612,12 @@ function getWithdrawalStats(platform = 'all', timestamps = {}, { assignedAgent =
     rejectedCount: row.rejectedCount || 0,
     totalPaidETB: row.totalPaidETB || 0,
     todayPaidETB: row.todayPaidETB || 0,
+    yesterdayPaidETB: row.yesterdayPaidETB || 0,
     weekPaidETB: row.weekPaidETB || 0,
     lastWeekPaidETB: row.lastWeekPaidETB || 0,
     monthPaidETB: row.monthPaidETB || 0,
     todayCount: row.todayCount || 0,
+    yesterdayCount: row.yesterdayCount || 0,
     weekCount: row.weekCount || 0,
     lastWeekCount: row.lastWeekCount || 0,
     monthCount: row.monthCount || 0,
