@@ -360,6 +360,8 @@ function getStats(platform = 'all', timestamps = {}, bank = 'all') {
   const whereClause = conditions.length > 0 ? (' WHERE ' + conditions.join(' AND ')) : '';
 
   const todayStart = Number(timestamps.todayStart) || 0;
+  const yesterdayStart = Number(timestamps.yesterdayStart) || 0;
+  const yesterdayEnd = Number(timestamps.yesterdayEnd) || 0;
   const weekStart = Number(timestamps.weekStart) || 0;
   const lastWeekStart = Number(timestamps.lastWeekStart) || 0;
   const lastWeekEnd = Number(timestamps.lastWeekEnd) || 0;
@@ -370,11 +372,13 @@ function getStats(platform = 'all', timestamps = {}, bank = 'all') {
       COUNT(*) as total,
       SUM(CASE WHEN status = 'verified' THEN COALESCE(verifiedAmount, amount, 0) ELSE 0 END) as totalETB,
       SUM(CASE WHEN status = 'verified' AND createdAt >= ${todayStart} THEN COALESCE(verifiedAmount, amount, 0) ELSE 0 END) as todayETB,
+      SUM(CASE WHEN status = 'verified' AND createdAt >= ${yesterdayStart} AND createdAt <= ${yesterdayEnd} THEN COALESCE(verifiedAmount, amount, 0) ELSE 0 END) as yesterdayETB,
       SUM(CASE WHEN status = 'verified' AND createdAt >= ${weekStart} THEN COALESCE(verifiedAmount, amount, 0) ELSE 0 END) as weekETB,
       SUM(CASE WHEN status = 'verified' AND createdAt >= ${lastWeekStart} AND createdAt <= ${lastWeekEnd} THEN COALESCE(verifiedAmount, amount, 0) ELSE 0 END) as lastWeekETB,
       SUM(CASE WHEN status = 'verified' AND createdAt >= ${monthStart} THEN COALESCE(verifiedAmount, amount, 0) ELSE 0 END) as monthETB,
       COUNT(CASE WHEN status = 'verified' THEN 1 END) as verified,
       COUNT(CASE WHEN status = 'verified' AND createdAt >= ${todayStart} THEN 1 END) as todayCount,
+      COUNT(CASE WHEN status = 'verified' AND createdAt >= ${yesterdayStart} AND createdAt <= ${yesterdayEnd} THEN 1 END) as yesterdayCount,
       COUNT(CASE WHEN status = 'verified' AND createdAt >= ${weekStart} THEN 1 END) as weekCount,
       COUNT(CASE WHEN status = 'verified' AND createdAt >= ${lastWeekStart} AND createdAt <= ${lastWeekEnd} THEN 1 END) as lastWeekCount,
       COUNT(CASE WHEN status = 'verified' AND createdAt >= ${monthStart} THEN 1 END) as monthCount,
@@ -392,6 +396,7 @@ function getStats(platform = 'all', timestamps = {}, bank = 'all') {
     bank,
     total: row.total || 0,
     todayCount: row.todayCount || 0,
+    yesterdayCount: row.yesterdayCount || 0,
     weekCount: row.weekCount || 0,
     lastWeekCount: row.lastWeekCount || 0,
     monthCount: row.monthCount || 0,
@@ -402,6 +407,7 @@ function getStats(platform = 'all', timestamps = {}, bank = 'all') {
     expired: row.expired || 0,
     totalETB: row.totalETB || 0,
     todayETB: row.todayETB || 0,
+    yesterdayETB: row.yesterdayETB || 0,
     weekETB: row.weekETB || 0,
     lastWeekETB: row.lastWeekETB || 0,
     monthETB: row.monthETB || 0,
