@@ -530,6 +530,10 @@ router.get('/list', requireStaffAuth, (req, res) => {
   if (timeRange && timeRange !== 'all') {
     const timestamps = getEthiopianTimeMidnightTimestamps();
     if (timeRange === 'today') filters.sinceTimestamp = timestamps.todayStart;
+    else if (timeRange === 'yesterday') {
+      filters.sinceTimestamp = timestamps.yesterdayStart;
+      filters.untilTimestamp = timestamps.yesterdayEnd;
+    }
     else if (timeRange === 'week') filters.sinceTimestamp = timestamps.weekStart;
     else if (timeRange === 'last_week') {
       filters.sinceTimestamp = timestamps.lastWeekStart;
@@ -615,6 +619,10 @@ router.get('/stats', requireStaffAuth, (req, res) => {
   }
   if (timeRange && timeRange !== 'all') {
     if (timeRange === 'today') options.sinceTimestamp = timestamps.todayStart;
+    else if (timeRange === 'yesterday') {
+      options.sinceTimestamp = timestamps.yesterdayStart;
+      options.untilTimestamp = timestamps.yesterdayEnd;
+    }
     else if (timeRange === 'week') options.sinceTimestamp = timestamps.weekStart;
     else if (timeRange === 'last_week') {
       options.sinceTimestamp = timestamps.lastWeekStart;
@@ -636,8 +644,8 @@ router.get('/stats', requireStaffAuth, (req, res) => {
         return res.json({
           platform,
           total: 0, pendingCount: 0, processingCount: 0, completedCount: 0, rejectedCount: 0,
-          totalPaidETB: 0, todayPaidETB: 0, weekPaidETB: 0, monthPaidETB: 0,
-          todayCount: 0, weekCount: 0, monthCount: 0
+          totalPaidETB: 0, todayPaidETB: 0, yesterdayPaidETB: 0, weekPaidETB: 0, monthPaidETB: 0,
+          todayCount: 0, yesterdayCount: 0, weekCount: 0, monthCount: 0
         });
       }
     }
