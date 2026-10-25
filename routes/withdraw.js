@@ -160,8 +160,15 @@ function getEthiopianTimeMidnightTimestamps() {
   const lastWeekStartUTC = weekStartUTC - ONE_WEEK_MS;
   const lastWeekEndUTC = weekStartUTC - 1;
 
+  // Yesterday: 00:00:00 EAT to 23:59:59.999 EAT of previous day
+  const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+  const yesterdayStartUTC = todayStartUTC - ONE_DAY_MS;
+  const yesterdayEndUTC = todayStartUTC - 1;
+
   return {
     todayStart: todayStartUTC,
+    yesterdayStart: yesterdayStartUTC,
+    yesterdayEnd: yesterdayEndUTC,
     weekStart: weekStartUTC,
     lastWeekStart: lastWeekStartUTC,
     lastWeekEnd: lastWeekEndUTC,
