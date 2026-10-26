@@ -1155,14 +1155,15 @@ router.get('/detailed-stats', requireAuth, requireAdminRole, (req, res) => {
   if (since) {
     depConds.push('createdAt >= ?');
     depParams.push(Number(since));
-    withConds.push('createdAt >= ?');
-    withParams.push(Number(since));
+    // Withdrawals: use processedAt (time they were actually paid) to match withdrawal dashboard behavior
+    withConds.push('(processedAt >= ? OR (processedAt IS NULL AND createdAt >= ?))');
+    withParams.push(Number(since), Number(since));
   }
   if (until) {
     depConds.push('createdAt <= ?');
     depParams.push(Number(until));
-    withConds.push('createdAt <= ?');
-    withParams.push(Number(until));
+    withConds.push('(processedAt <= ? OR (processedAt IS NULL AND createdAt <= ?))');
+    withParams.push(Number(until), Number(until));
   }
 
   const isApproved = status === 'approved' || status === 'successful' || status === 'completed' || status === 'verified';
@@ -1311,7 +1312,7 @@ router.get('/detailed-stats', requireAuth, requireAdminRole, (req, res) => {
       coalesce(accountNumber, phoneNumber, '') as account,
       coalesce(assignedAgent, processedBy, '') as agent,
       status,
-      createdAt
+      COALESCE(processedAt, createdAt) as createdAt
     FROM withdrawals${withWhere}
   `;
 
