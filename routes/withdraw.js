@@ -648,28 +648,10 @@ router.get('/stats', requireStaffAuth, (req, res) => {
     // We don't block it even if it's not in their current session.platforms —
     // they are just querying their own historical data.
   } else {
-    // Admin filtering by agent:
+    // Admin filtering by agent — only filter by agent identity, NOT by their current bank/platform assignments.
+    // Historical completed withdrawals on now-disabled banks/platforms must still be included in stats.
     if (agent && agent !== 'all') {
       options.assignedAgent = agent;
-      const settings = readJSON('settings.json') || {};
-      const targetAgentUser = (settings.adminUsers || []).find(
-        u => u.username && u.username.toLowerCase() === agent.toLowerCase()
-      );
-      if (targetAgentUser) {
-        const allowedPlatforms = (Array.isArray(targetAgentUser.platforms) && targetAgentUser.platforms.length > 0)
-          ? targetAgentUser.platforms.map(p => String(p).toLowerCase())
-          : null;
-        if (allowedPlatforms && (!platform || platform === 'all')) {
-          options.platforms = allowedPlatforms;
-        }
-
-        const allowedBanks = (Array.isArray(targetAgentUser.banks) && targetAgentUser.banks.length > 0)
-          ? targetAgentUser.banks.map(b => String(b).toLowerCase())
-          : null;
-        if (allowedBanks && (!bank || bank === 'all')) {
-          options.banks = allowedBanks;
-        }
-      }
     }
   }
 
