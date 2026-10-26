@@ -7,7 +7,8 @@ const {
   setAgentLimit,
   getAgentLimit,
   getAllAgentPools,
-  normalizeAgent
+  normalizeAgent,
+  getAgentConnectedAccounts
 } = require('../bankLimits');
 
 const dataDir = path.join(__dirname, '../data');
@@ -1089,6 +1090,9 @@ router.get('/detailed-stats', requireAuth, requireAdminRole, (req, res) => {
   } else if (timeRange === 'yesterday') {
     since = timestamps.yesterdayStart;
     until = timestamps.yesterdayEnd;
+  } else if (timeRange === 'day_before_yesterday') {
+    since = timestamps.yesterdayStart - 24 * 3600 * 1000;
+    until = timestamps.yesterdayStart - 1;
   } else if (timeRange === 'week') {
     since = timestamps.weekStart;
   } else if (timeRange === 'last_week') {
@@ -1126,8 +1130,16 @@ router.get('/detailed-stats', requireAuth, requireAdminRole, (req, res) => {
   }
 
   if (agent && agent !== 'all') {
-    depConds.push('LOWER(assignedAgent) = LOWER(?)');
-    depParams.push(agent);
+    const connectedAccs = getAgentConnectedAccounts(agent, platform);
+    const accList = connectedAccs.map(a => a.account).filter(Boolean);
+    if (accList.length > 0) {
+      const placeholders = accList.map(() => '?').join(',');
+      depConds.push(`(LOWER(assignedAgent) = LOWER(?) OR accountNumber IN (${placeholders}) OR phoneNumber IN (${placeholders}))`);
+      depParams.push(agent, ...accList, ...accList);
+    } else {
+      depConds.push('LOWER(assignedAgent) = LOWER(?)');
+      depParams.push(agent);
+    }
     withConds.push('(LOWER(assignedAgent) = LOWER(?) OR LOWER(processedBy) = LOWER(?))');
     withParams.push(agent, agent);
   }
@@ -1153,13 +1165,17 @@ router.get('/detailed-stats', requireAuth, requireAdminRole, (req, res) => {
     withParams.push(Number(until));
   }
 
-  if (status === 'successful') {
-    depConds.push("status = 'verified'");
+  const isApproved = status === 'approved' || status === 'successful' || status === 'completed' || status === 'verified';
+  const isPending = status === 'pending';
+  const isFailed = status === 'failed' || status === 'rejected' || status === 'cancelled';
+
+  if (isApproved) {
+    depConds.push("status IN ('verified', 'completed')");
     withConds.push("status = 'completed'");
-  } else if (status === 'failed') {
+  } else if (isFailed) {
     depConds.push("status IN ('failed', 'expired', 'rejected')");
     withConds.push("status = 'rejected'");
-  } else if (status === 'pending') {
+  } else if (isPending) {
     depConds.push("status IN ('pending', 'processing')");
     withConds.push("status IN ('pending', 'processing')");
   }
@@ -1350,7 +1366,32 @@ router.get('/detailed-stats', requireAuth, requireAdminRole, (req, res) => {
   const allPhones = Array.from(new Set(numPhones.filter(Boolean))).sort();
   const allBankAccounts = Array.from(new Set(bankAccs.filter(Boolean))).sort();
 
+  const summary = {
+    totalVolume: depTotal + withTotal,
+    depositTotal: depTotal,
+    depositCount: depCount,
+    withdrawTotal: withTotal,
+    withdrawCount: withCount,
+    net: depTotal - withTotal
+  };
+  const breakdown = {
+    platform: Object.values(platMap),
+    bank: Object.values(bankMap),
+    agent: Object.values(agentMap)
+  };
+  const filterOptions = {
+    allAgents,
+    allPhones,
+    allBankAccounts,
+    agents: allAgents,
+    phones: allPhones,
+    bankAccounts: allBankAccounts,
+    platforms: ['jember', 'walta', 'bravobirr', 'abay'],
+    banks: ['telebirr', 'cbe', 'boa', 'cbebirr', 'awash', 'dashen', 'cbeagent', 'ebirr']
+  };
+
   res.json({
+    summary,
     totals: {
       depositTotalETB: depTotal,
       depositCount: depCount,
@@ -1359,6 +1400,7 @@ router.get('/detailed-stats', requireAuth, requireAdminRole, (req, res) => {
       netETB: depTotal - withTotal,
       totalCount: depCount + withCount
     },
+    breakdown,
     breakdownPlatforms: Object.values(platMap),
     breakdownBanks: Object.values(bankMap),
     breakdownAgents: Object.values(agentMap),
@@ -1366,16 +1408,11 @@ router.get('/detailed-stats', requireAuth, requireAdminRole, (req, res) => {
     pagination: {
       page: pageNum,
       limit: limitNum,
+      total: totalRecords,
       totalRecords,
       totalPages: Math.ceil(totalRecords / limitNum) || 1
     },
-    filterOptions: {
-      agents: allAgents,
-      phones: allPhones,
-      bankAccounts: allBankAccounts,
-      platforms: ['jember', 'walta', 'bravobirr', 'abay'],
-      banks: ['telebirr', 'cbe', 'boa', 'cbebirr', 'awash', 'dashen', 'cbeagent', 'ebirr']
-    }
+    filterOptions
   });
 });
 
