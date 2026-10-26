@@ -550,8 +550,9 @@ router.get('/list', requireStaffAuth, (req, res) => {
   }
 
   if (session && session.isAgent && !session.isSuperAdmin) {
-    // 1 agent only sees withdrawals assigned to them
+    // Agents only see pending withdrawals assigned to them
     filters.assignedAgent = session.username;
+    filters.status = 'pending';
 
     // And only for platforms assigned to this agent
     const allowedPlatforms = (Array.isArray(session.platforms) && session.platforms.length > 0)
