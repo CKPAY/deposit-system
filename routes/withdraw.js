@@ -640,29 +640,13 @@ router.get('/stats', requireStaffAuth, (req, res) => {
   }
 
   if (session && session.isAgent && !session.isSuperAdmin) {
+    // Only restrict by agent identity — do NOT restrict by current platform/bank assignments.
+    // Historical completed withdrawals on now-disabled platforms must still be visible in stats.
     options.assignedAgent = session.username;
-    const allowedPlatforms = (Array.isArray(session.platforms) && session.platforms.length > 0)
-      ? session.platforms.map(p => String(p).toLowerCase())
-      : ['jember', 'bravobirr', 'abay', 'walta'];
 
-    if (!platform || platform === 'all') {
-      options.platforms = allowedPlatforms;
-    } else {
-      if (!allowedPlatforms.includes(String(platform).toLowerCase())) {
-        return res.json({
-          platform,
-          total: 0, pendingCount: 0, processingCount: 0, completedCount: 0, rejectedCount: 0,
-          totalPaidETB: 0, todayPaidETB: 0, yesterdayPaidETB: 0, weekPaidETB: 0, monthPaidETB: 0,
-          todayCount: 0, yesterdayCount: 0, weekCount: 0, monthCount: 0
-        });
-      }
-    }
-
-    const allowedBanks = (Array.isArray(session.banks) && session.banks.length > 0)
-      ? session.banks.map(b => String(b).toLowerCase())
-      : ['telebirr', 'cbe', 'boa', 'cbebirr', 'awash', 'dashen', 'cbeagent', 'ebirr'];
-
-    options.banks = allowedBanks;
+    // If the agent explicitly requests a specific platform filter, allow it through.
+    // We don't block it even if it's not in their current session.platforms —
+    // they are just querying their own historical data.
   } else {
     // Admin filtering by agent:
     if (agent && agent !== 'all') {
