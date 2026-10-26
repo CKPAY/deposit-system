@@ -1036,6 +1036,349 @@ router.put('/settings', requireAdminRole, (req, res) => {
   });
 });
 
+// Helper for date parsing in Ethiopian Time (EAT, UTC+3)
+function parseEatDateRange(startDateStr, endDateStr) {
+  if (!startDateStr) return null;
+  function parseDateToUTC(str) {
+    if (!str) return null;
+    const s = String(str).trim();
+    let match = s.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/);
+    if (match) {
+      return { y: parseInt(match[1], 10), m: parseInt(match[2], 10) - 1, d: parseInt(match[3], 10) };
+    }
+    match = s.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})$/);
+    if (match) {
+      let y = parseInt(match[3], 10);
+      if (y < 100) y = 2000 + y;
+      return { y, m: parseInt(match[2], 10) - 1, d: parseInt(match[1], 10) };
+    }
+    return null;
+  }
+
+  const startParsed = parseDateToUTC(startDateStr);
+  if (!startParsed) return null;
+  const endParsed = endDateStr ? (parseDateToUTC(endDateStr) || startParsed) : startParsed;
+
+  const ETHIOPIA_OFFSET_MS = 3 * 60 * 60 * 1000;
+  const startUTC = Date.UTC(startParsed.y, startParsed.m, startParsed.d, 0, 0, 0) - ETHIOPIA_OFFSET_MS;
+  const endUTC = Date.UTC(endParsed.y, endParsed.m, endParsed.d, 23, 59, 59, 999) - ETHIOPIA_OFFSET_MS;
+  return { startUTC, endUTC };
+}
+
+router.get('/detailed-stats', requireAuth, requireAdminRole, (req, res) => {
+  const {
+    type = 'all',
+    platform = 'all',
+    bank = 'all',
+    agent = 'all',
+    identifier = '',
+    status = 'all',
+    timeRange = 'all',
+    startDate = '',
+    endDate = '',
+    page = 1,
+    limit = 50
+  } = req.query;
+
+  const timestamps = getEthiopianTimeMidnightTimestamps();
+  let since = null;
+  let until = null;
+
+  if (timeRange === 'today') {
+    since = timestamps.todayStart;
+  } else if (timeRange === 'yesterday') {
+    since = timestamps.yesterdayStart;
+    until = timestamps.yesterdayEnd;
+  } else if (timeRange === 'week') {
+    since = timestamps.weekStart;
+  } else if (timeRange === 'last_week') {
+    since = timestamps.lastWeekStart;
+    until = timestamps.lastWeekEnd;
+  } else if (timeRange === 'month') {
+    since = timestamps.monthStart;
+  } else if (timeRange === 'custom' || startDate) {
+    const r = parseEatDateRange(startDate, endDate);
+    if (r) {
+      since = r.startUTC;
+      until = r.endUTC;
+    }
+  }
+
+  const depConds = [];
+  const depParams = [];
+  const withConds = [];
+  const withParams = [];
+
+  if (platform && platform !== 'all') {
+    depConds.push('LOWER(platform) = LOWER(?)');
+    depParams.push(platform);
+    withConds.push('LOWER(platform) = LOWER(?)');
+    withParams.push(platform);
+  }
+
+  if (bank && bank !== 'all') {
+    let b = String(bank).toLowerCase();
+    if (b === 'siinqee' || b === 'sinqee') b = 'ebirr';
+    depConds.push('LOWER(bank) = LOWER(?)');
+    depParams.push(b);
+    withConds.push('LOWER(bank) = LOWER(?)');
+    withParams.push(b);
+  }
+
+  if (agent && agent !== 'all') {
+    depConds.push('LOWER(assignedAgent) = LOWER(?)');
+    depParams.push(agent);
+    withConds.push('(LOWER(assignedAgent) = LOWER(?) OR LOWER(processedBy) = LOWER(?))');
+    withParams.push(agent, agent);
+  }
+
+  if (identifier && identifier.trim()) {
+    const idClean = identifier.trim();
+    depConds.push('(phoneNumber LIKE ? OR accountNumber LIKE ? OR transactionId LIKE ? OR userId LIKE ?)');
+    depParams.push(`%${idClean}%`, `%${idClean}%`, `%${idClean}%`, `%${idClean}%`);
+    withConds.push('(phoneNumber LIKE ? OR accountNumber LIKE ? OR transactionId LIKE ? OR userId LIKE ?)');
+    withParams.push(`%${idClean}%`, `%${idClean}%`, `%${idClean}%`, `%${idClean}%`);
+  }
+
+  if (since) {
+    depConds.push('createdAt >= ?');
+    depParams.push(Number(since));
+    withConds.push('createdAt >= ?');
+    withParams.push(Number(since));
+  }
+  if (until) {
+    depConds.push('createdAt <= ?');
+    depParams.push(Number(until));
+    withConds.push('createdAt <= ?');
+    withParams.push(Number(until));
+  }
+
+  if (status === 'successful') {
+    depConds.push("status = 'verified'");
+    withConds.push("status = 'completed'");
+  } else if (status === 'failed') {
+    depConds.push("status IN ('failed', 'expired', 'rejected')");
+    withConds.push("status = 'rejected'");
+  } else if (status === 'pending') {
+    depConds.push("status IN ('pending', 'processing')");
+    withConds.push("status IN ('pending', 'processing')");
+  }
+
+  const depWhere = depConds.length > 0 ? ' WHERE ' + depConds.join(' AND ') : '';
+  const withWhere = withConds.length > 0 ? ' WHERE ' + withConds.join(' AND ') : '';
+
+  // 1. Overall Aggregations
+  let depTotal = 0, depCount = 0;
+  if (type === 'all' || type === 'deposit') {
+    const dRes = db.prepare(`SELECT count(*) as count, sum(coalesce(verifiedAmount, amount, 0)) as total FROM transactions${depWhere}`).get(...depParams);
+    depCount = dRes?.count || 0;
+    depTotal = dRes?.total || 0;
+  }
+
+  let withTotal = 0, withCount = 0;
+  if (type === 'all' || type === 'withdraw') {
+    const wRes = db.prepare(`SELECT count(*) as count, sum(amount) as total FROM withdrawals${withWhere}`).get(...withParams);
+    withCount = wRes?.count || 0;
+    withTotal = wRes?.total || 0;
+  }
+
+  // 2. Breakdown by Platform
+  const platMap = {};
+  for (const p of ['jember', 'walta', 'bravobirr', 'abay']) {
+    platMap[p] = { platform: p, depositETB: 0, depositCount: 0, withdrawETB: 0, withdrawCount: 0, netETB: 0 };
+  }
+  if (type === 'all' || type === 'deposit') {
+    const pDeps = db.prepare(`SELECT LOWER(platform) as platform, count(*) as count, sum(coalesce(verifiedAmount, amount, 0)) as total FROM transactions${depWhere} GROUP BY LOWER(platform)`).all(...depParams);
+    pDeps.forEach(r => {
+      if (r.platform && platMap[r.platform]) {
+        platMap[r.platform].depositETB = r.total || 0;
+        platMap[r.platform].depositCount = r.count || 0;
+      }
+    });
+  }
+  if (type === 'all' || type === 'withdraw') {
+    const pWiths = db.prepare(`SELECT LOWER(platform) as platform, count(*) as count, sum(amount) as total FROM withdrawals${withWhere} GROUP BY LOWER(platform)`).all(...withParams);
+    pWiths.forEach(r => {
+      if (r.platform && platMap[r.platform]) {
+        platMap[r.platform].withdrawETB = r.total || 0;
+        platMap[r.platform].withdrawCount = r.count || 0;
+      }
+    });
+  }
+  Object.values(platMap).forEach(p => {
+    p.netETB = p.depositETB - p.withdrawETB;
+  });
+
+  // 3. Breakdown by Bank
+  const bankMap = {};
+  if (type === 'all' || type === 'deposit') {
+    const bDeps = db.prepare(`SELECT LOWER(bank) as bank, count(*) as count, sum(coalesce(verifiedAmount, amount, 0)) as total FROM transactions${depWhere} GROUP BY LOWER(bank)`).all(...depParams);
+    bDeps.forEach(r => {
+      if (!r.bank) return;
+      if (!bankMap[r.bank]) bankMap[r.bank] = { bank: r.bank, depositETB: 0, depositCount: 0, withdrawETB: 0, withdrawCount: 0, netETB: 0 };
+      bankMap[r.bank].depositETB = r.total || 0;
+      bankMap[r.bank].depositCount = r.count || 0;
+    });
+  }
+  if (type === 'all' || type === 'withdraw') {
+    const bWiths = db.prepare(`SELECT LOWER(bank) as bank, count(*) as count, sum(amount) as total FROM withdrawals${withWhere} GROUP BY LOWER(bank)`).all(...withParams);
+    bWiths.forEach(r => {
+      if (!r.bank) return;
+      if (!bankMap[r.bank]) bankMap[r.bank] = { bank: r.bank, depositETB: 0, depositCount: 0, withdrawETB: 0, withdrawCount: 0, netETB: 0 };
+      bankMap[r.bank].withdrawETB = r.total || 0;
+      bankMap[r.bank].withdrawCount = r.count || 0;
+    });
+  }
+  Object.values(bankMap).forEach(b => {
+    b.netETB = b.depositETB - b.withdrawETB;
+  });
+
+  // 4. Breakdown by Agent
+  const agentMap = {};
+  if (type === 'all' || type === 'deposit') {
+    const depAgentConds = [...depConds, "assignedAgent IS NOT NULL AND assignedAgent != ''"];
+    const depAgentWhere = ' WHERE ' + depAgentConds.join(' AND ');
+    const aDeps = db.prepare(`SELECT LOWER(assignedAgent) as agent, count(*) as count, sum(coalesce(verifiedAmount, amount, 0)) as total FROM transactions${depAgentWhere} GROUP BY LOWER(assignedAgent)`).all(...depParams);
+    aDeps.forEach(r => {
+      if (!r.agent) return;
+      if (!agentMap[r.agent]) agentMap[r.agent] = { agent: r.agent, depositETB: 0, depositCount: 0, withdrawETB: 0, withdrawCount: 0, netETB: 0 };
+      agentMap[r.agent].depositETB = r.total || 0;
+      agentMap[r.agent].depositCount = r.count || 0;
+    });
+  }
+  if (type === 'all' || type === 'withdraw') {
+    const withAgentConds = [...withConds, "(assignedAgent IS NOT NULL OR processedBy IS NOT NULL)"];
+    const withAgentWhere = ' WHERE ' + withAgentConds.join(' AND ');
+    const aWiths = db.prepare(`SELECT LOWER(coalesce(assignedAgent, processedBy)) as agent, count(*) as count, sum(amount) as total FROM withdrawals${withAgentWhere} GROUP BY LOWER(coalesce(assignedAgent, processedBy))`).all(...withParams);
+    aWiths.forEach(r => {
+      if (!r.agent) return;
+      if (!agentMap[r.agent]) agentMap[r.agent] = { agent: r.agent, depositETB: 0, depositCount: 0, withdrawETB: 0, withdrawCount: 0, netETB: 0 };
+      agentMap[r.agent].withdrawETB = r.total || 0;
+      agentMap[r.agent].withdrawCount = r.count || 0;
+    });
+  }
+  Object.values(agentMap).forEach(a => {
+    a.netETB = a.depositETB - a.withdrawETB;
+  });
+
+  // 5. Unified Paginated Transactions Feed
+  let unionSql = '';
+  const unionParams = [];
+
+  const depSelect = `
+    SELECT 
+      'deposit' as type,
+      id,
+      transactionId,
+      orderId,
+      userId,
+      platform,
+      bank,
+      coalesce(verifiedAmount, amount, 0) as amount,
+      coalesce(accountNumber, phoneNumber, '') as account,
+      coalesce(assignedAgent, '') as agent,
+      status,
+      createdAt
+    FROM transactions${depWhere}
+  `;
+
+  const withSelect = `
+    SELECT 
+      'withdraw' as type,
+      id,
+      transactionId,
+      orderId,
+      userId,
+      platform,
+      bank,
+      amount,
+      coalesce(accountNumber, phoneNumber, '') as account,
+      coalesce(assignedAgent, processedBy, '') as agent,
+      status,
+      createdAt
+    FROM withdrawals${withWhere}
+  `;
+
+  if (type === 'deposit') {
+    unionSql = depSelect;
+    unionParams.push(...depParams);
+  } else if (type === 'withdraw') {
+    unionSql = withSelect;
+    unionParams.push(...withParams);
+  } else {
+    unionSql = `${depSelect} UNION ALL ${withSelect}`;
+    unionParams.push(...depParams, ...withParams);
+  }
+
+  const countSql = `SELECT count(*) as total FROM (${unionSql})`;
+  const totalRecords = db.prepare(countSql).get(...unionParams)?.total || 0;
+
+  const pageNum = Math.max(1, parseInt(page, 10) || 1);
+  const limitNum = Math.max(1, Math.min(200, parseInt(limit, 10) || 50));
+  const offset = (pageNum - 1) * limitNum;
+
+  const dataSql = `${unionSql} ORDER BY createdAt DESC LIMIT ? OFFSET ?`;
+  const transactions = db.prepare(dataSql).all(...unionParams, limitNum, offset);
+
+  // 6. Metadata for selectors (cached / fast collected)
+  const settings = readJSON('settings.json') || {};
+  const settingsUsers = (settings.adminUsers || []).map(u => u.username).filter(Boolean);
+  const txAgents = db.prepare("SELECT DISTINCT assignedAgent FROM transactions WHERE assignedAgent IS NOT NULL AND assignedAgent != ''").all().map(r => r.assignedAgent);
+  const withAgents = db.prepare("SELECT DISTINCT assignedAgent FROM withdrawals WHERE assignedAgent IS NOT NULL AND assignedAgent != ''").all().map(r => r.assignedAgent);
+  const withProcessors = db.prepare("SELECT DISTINCT processedBy FROM withdrawals WHERE processedBy IS NOT NULL AND processedBy != ''").all().map(r => r.processedBy);
+
+  const allAgents = Array.from(new Set([...settingsUsers, ...txAgents, ...withAgents, ...withProcessors].map(a => a.trim()).filter(Boolean))).sort();
+
+  const numbersData = readJSON('numbers.json') || {};
+  const numPhones = [];
+  for (const p in numbersData) {
+    if (Array.isArray(numbersData[p]?.numbers)) {
+      numbersData[p].numbers.forEach(n => { if (n.phone) numPhones.push(n.phone); });
+    }
+  }
+  const bankAccountsData = readJSON('bank_accounts.json') || {};
+  const bankAccs = [];
+  for (const p in bankAccountsData) {
+    if (p === 'agentLimits') continue;
+    for (const b in bankAccountsData[p]) {
+      if (Array.isArray(bankAccountsData[p][b])) {
+        bankAccountsData[p][b].forEach(a => { if (a.account) bankAccs.push(a.account); });
+      }
+    }
+  }
+
+  const allPhones = Array.from(new Set(numPhones.filter(Boolean))).sort();
+  const allBankAccounts = Array.from(new Set(bankAccs.filter(Boolean))).sort();
+
+  res.json({
+    totals: {
+      depositTotalETB: depTotal,
+      depositCount: depCount,
+      withdrawTotalETB: withTotal,
+      withdrawCount: withCount,
+      netETB: depTotal - withTotal,
+      totalCount: depCount + withCount
+    },
+    breakdownPlatforms: Object.values(platMap),
+    breakdownBanks: Object.values(bankMap),
+    breakdownAgents: Object.values(agentMap),
+    transactions,
+    pagination: {
+      page: pageNum,
+      limit: limitNum,
+      totalRecords,
+      totalPages: Math.ceil(totalRecords / limitNum) || 1
+    },
+    filterOptions: {
+      agents: allAgents,
+      phones: allPhones,
+      bankAccounts: allBankAccounts,
+      platforms: ['jember', 'walta', 'bravobirr', 'abay'],
+      banks: ['telebirr', 'cbe', 'boa', 'cbebirr', 'awash', 'dashen', 'cbeagent', 'ebirr']
+    }
+  });
+});
+
 router.get('/assignments', (req, res) => {
   const platform = req.query.platform || 'all';
   const p = String(platform).toLowerCase();
