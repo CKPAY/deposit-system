@@ -283,7 +283,8 @@ function expireOldPendingTxs(userId, platform = 'jember') {
 function expireAllOldPendingTxs() {
   const now = Date.now();
   db.prepare(`UPDATE transactions SET status = 'expired' WHERE status = 'pending' AND expiresAt < ?`).run(now);
-  db.prepare(`UPDATE transactions SET status = 'failed', failReason = 'Verification timeout' WHERE status = 'processing' AND submittedAt < ?`).run(now - 30000);
+  // Auto-fail automatic API requests that timed out, but preserve manual review requests with uploaded screenshots
+  db.prepare(`UPDATE transactions SET status = 'failed', failReason = 'Verification timeout' WHERE status = 'processing' AND receiptImage IS NULL AND submittedAt < ?`).run(now - 30000);
 }
 
 function getAllTxs(filters = {}) {
@@ -312,16 +313,16 @@ function getAllTxs(filters = {}) {
   if (filters.assignedAgent && filters.assignedAgent !== 'all') {
     if (Array.isArray(filters.accountNumbers) && filters.accountNumbers.length > 0) {
       const placeholders = filters.accountNumbers.map(() => '?').join(',');
-      conditions.push(`(assignedAgent = ? OR accountNumber IN (${placeholders}))`);
-      params.push(String(filters.assignedAgent), ...filters.accountNumbers);
+      conditions.push(`(assignedAgent = ? OR accountNumber IN (${placeholders}) OR phoneNumber IN (${placeholders}))`);
+      params.push(String(filters.assignedAgent), ...filters.accountNumbers, ...filters.accountNumbers);
     } else {
       conditions.push(`assignedAgent = ?`);
       params.push(String(filters.assignedAgent));
     }
   } else if (Array.isArray(filters.accountNumbers) && filters.accountNumbers.length > 0) {
     const placeholders = filters.accountNumbers.map(() => '?').join(',');
-    conditions.push(`accountNumber IN (${placeholders})`);
-    params.push(...filters.accountNumbers);
+    conditions.push(`(accountNumber IN (${placeholders}) OR phoneNumber IN (${placeholders}))`);
+    params.push(...filters.accountNumbers, ...filters.accountNumbers);
   }
 
   if (filters.search) {
