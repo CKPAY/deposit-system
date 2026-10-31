@@ -190,17 +190,18 @@ function getVerificationMode(platform = 'jember', bank = 'cbe') {
 
 function getBankVerificationMethod(platform = 'jember', bank = 'cbe') {
   const mode = getVerificationMode(platform, bank);
-  if (mode === 'manual') return 'screenshot';
-  const settings = getPlatformSettings(platform);
   let b = String(bank || '').toLowerCase().trim();
   if (b === 'siinqee' || b === 'sinqee') b = 'ebirr';
   if (b === 'cbe_agent') b = 'cbeagent';
 
-  if (settings.bankVerificationMethods && settings.bankVerificationMethods[b]) {
-    const val = settings.bankVerificationMethods[b];
-    if (val === 'screenshot' || val === 'copy_paste') return val;
+  // Telebirr auto: strictly copy_paste; Telebirr manual: strictly screenshot
+  if (b === 'telebirr') {
+    return mode === 'manual' ? 'screenshot' : 'copy_paste';
   }
-  return settings.bankVerificationMethod === 'screenshot' ? 'screenshot' : 'copy_paste';
+
+  // Banks: manual is strictly screenshot; auto supports both screenshot and copy_paste
+  if (mode === 'manual') return 'screenshot';
+  return 'both';
 }
 
 function getPlatformNumbers(platform = 'jember') {
@@ -1548,6 +1549,10 @@ router.post('/verify', (req, res) => {
   }
 
   const platform = tx.platform || 'jember';
+  const mode = getVerificationMode(platform, tx.bank);
+  if (mode === 'manual') {
+    return res.status(400).json({ error: 'Manual verification requires uploading a receipt screenshot.' });
+  }
 
   if (Date.now() > tx.expiresAt) {
     updateTxStatus(sessionId, 'expired');
