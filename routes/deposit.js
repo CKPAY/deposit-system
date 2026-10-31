@@ -175,16 +175,32 @@ function getPlatformSettings(platform = 'jember') {
   };
 }
 
+function getVerificationMode(platform = 'jember', bank = 'cbe') {
+  const settings = getPlatformSettings(platform);
+  let b = String(bank || '').toLowerCase().trim();
+  if (b === 'siinqee' || b === 'sinqee') b = 'ebirr';
+  if (b === 'cbe_agent') b = 'cbeagent';
+
+  const raw = (settings.bankVerificationMethods && settings.bankVerificationMethods[b])
+    || (b !== 'telebirr' ? settings.bankVerificationMethod : null)
+    || 'auto';
+
+  return raw === 'manual' ? 'manual' : 'auto';
+}
+
 function getBankVerificationMethod(platform = 'jember', bank = 'cbe') {
+  const mode = getVerificationMode(platform, bank);
+  if (mode === 'manual') return 'screenshot';
   const settings = getPlatformSettings(platform);
   let b = String(bank || '').toLowerCase().trim();
   if (b === 'siinqee' || b === 'sinqee') b = 'ebirr';
   if (b === 'cbe_agent') b = 'cbeagent';
 
   if (settings.bankVerificationMethods && settings.bankVerificationMethods[b]) {
-    return settings.bankVerificationMethods[b];
+    const val = settings.bankVerificationMethods[b];
+    if (val === 'screenshot' || val === 'copy_paste') return val;
   }
-  return settings.bankVerificationMethod || 'copy_paste';
+  return settings.bankVerificationMethod === 'screenshot' ? 'screenshot' : 'copy_paste';
 }
 
 function getPlatformNumbers(platform = 'jember') {
@@ -701,12 +717,18 @@ router.get('/active-banks', (req, res) => {
     enrichedStatus.cbeagent = enrichedStatus.mpesa !== undefined ? enrichedStatus.mpesa : (enrichedStatus.cbe !== undefined ? enrichedStatus.cbe : true);
   }
 
+  const verificationModes = {};
+  SUPPORTED_7_BANKS.concat(['telebirr']).forEach(b => {
+    verificationModes[b] = getVerificationMode(p, b);
+  });
+
   res.json({
     platform: p,
     activeBanks,
     status: enrichedStatus,
     bankVerificationMethod: settings.bankVerificationMethod || 'copy_paste',
-    bankVerificationMethods: settings.bankVerificationMethods || {}
+    bankVerificationMethods: settings.bankVerificationMethods || {},
+    verificationModes
   });
 });
 
@@ -756,7 +778,23 @@ router.post('/init', (req, res) => {
     return res.status(400).json({ error: `Amount must be between ${settings.minDeposit} and ${settings.maxDeposit} ETB` });
   }
 
-  const explicitBank = req.body.bank || tokenPayload.bank || req.query.bank || 'telebirr';
+  const referer = String(req.headers.referer || req.headers.referrer || '').toLowerCase();
+  const isRefererTelebirr = (referer.includes('/pay/am') || referer.includes('/deposit')) && !referer.includes('/pay/banks') && !referer.includes('/deposit/banks') && !referer.includes('mode=banks');
+  const tokenOrQueryBank = tokenPayload.bank || req.query.bank;
+
+  let explicitBank = req.body.bank || tokenOrQueryBank || 'telebirr';
+  // If the user opened the Telebirr checkout route (/pay/am or /deposit) and neither the token nor query specified a bank,
+  // do not allow a stale localStorage 'cbe' from req.body to override it
+  if (isRefererTelebirr && !tokenOrQueryBank && explicitBank !== 'telebirr') {
+    explicitBank = 'telebirr';
+  }
+
+  // Safety fallback: if a bank is disabled for this platform, but neither the token nor query requested that bank
+  // (e.g. came from an old mobile browser cache), gracefully fallback to 'telebirr' instead of failing with an error.
+  if (explicitBank !== 'telebirr' && !tokenOrQueryBank && !isBankEnabled(platform, explicitBank)) {
+    explicitBank = 'telebirr';
+  }
+
   const rawBankCandidate = String(explicitBank).toLowerCase();
   const isSiinqeePartner = ['siinqee', 'sinqee'].some(function(x) { return rawBankCandidate.includes(x); });
   const bank = isSiinqeePartner ? 'ebirr' : rawBankCandidate;
@@ -884,6 +922,7 @@ router.post('/init', (req, res) => {
         amount: activeSession.amount,
         requestedAmount: activeSession.requestedAmount || activeSession.amount,
         bankVerificationMethod: getBankVerificationMethod(platform, activeSession.bank || bank),
+        verificationMode: getVerificationMode(platform, activeSession.bank || bank),
         expiresAt: activeSession.expiresAt,
         sessionExpiry: settings.sessionExpiry,
         currency: settings.currency,
@@ -934,6 +973,7 @@ router.post('/init', (req, res) => {
     amount: amt,
     requestedAmount: amt,
     bankVerificationMethod: getBankVerificationMethod(platform, bank),
+    verificationMode: getVerificationMode(platform, bank),
     expiresAt,
     sessionExpiry: settings.sessionExpiry,
     currency: settings.currency,
@@ -1720,14 +1760,15 @@ router.post('/verify-screenshot', async (req, res) => {
     return res.status(404).json({ error: 'Session not found' });
   }
 
-  // STRICT REQUIREMENT: Screenshot verification is ONLY for banks, NOT Telebirr!
-  if (tx.bank === 'telebirr') {
+  const platform = tx.platform || 'jember';
+  const mode = getVerificationMode(platform, tx.bank);
+
+  // In auto mode, Telebirr uses 10-char transaction ID. In manual mode, Telebirr allows screenshot.
+  if (tx.bank === 'telebirr' && mode !== 'manual') {
     return res.status(400).json({
-      error: 'Screenshot verification is only available for bank transfers. For Telebirr, please enter your transaction number.'
+      error: 'Screenshot verification is only available when manual mode is enabled. For automatic Telebirr, please enter your transaction number.'
     });
   }
-
-  const platform = tx.platform || 'jember';
 
   if (Date.now() > tx.expiresAt) {
     updateTxStatus(sessionId, 'expired');
@@ -1775,6 +1816,16 @@ router.post('/verify-screenshot', async (req, res) => {
     submittedAt: Date.now(),
     receiptImage: savedImageUrl
   });
+
+  if (mode === 'manual') {
+    // In manual mode, stay in 'processing' state waiting for staff confirmation in Transactions
+    return res.json({
+      success: true,
+      status: 'processing',
+      sessionId,
+      manual: true
+    });
+  }
 
   const settings = getPlatformSettings(platform);
   const targetAccount = tx.accountNumber || tx.phoneNumber;
@@ -2061,5 +2112,9 @@ router.post('/reset', (req, res) => {
     requestedAmount: updated.requestedAmount,
   });
 });
+
+router.createWebhookPayload = createWebhookPayload;
+router.sendWebhookWithRetry = sendWebhookWithRetry;
+router.getVerificationMode = getVerificationMode;
 
 module.exports = router;
