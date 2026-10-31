@@ -8,7 +8,8 @@ const {
   getAgentLimit,
   getAllAgentPools,
   normalizeAgent,
-  getAgentConnectedAccounts
+  getAgentConnectedAccounts,
+  deductBankDepositLimit
 } = require('../bankLimits');
 
 const dataDir = path.join(__dirname, '../data');
@@ -267,7 +268,7 @@ function writeJSON(file, data) {
   fs.writeFileSync(path.join(dataDir, file), JSON.stringify(data, null, 2));
 }
 
-const { getAllTxs, getStats, expireAllOldPendingTxs, db } = require('../db');
+const { getAllTxs, getStats, expireAllOldPendingTxs, getTxById, updateTxStatus, db } = require('../db');
 
 function updateExpiredTransactions() {
   expireAllOldPendingTxs();
@@ -329,9 +330,20 @@ router.get('/stats', (req, res) => {
   res.json(stats);
 });
 
-router.get('/transactions', (req, res) => {
+router.get('/transactions', requireAuth, (req, res) => {
   const { status, search, platform, bank } = req.query;
-  const filtered = getAllTxs({ status, search, platform, bank });
+  const session = req.adminSession;
+  const filters = { status, search, platform, bank };
+
+  if (session && session.isAgent && !session.isSuperAdmin) {
+    filters.assignedAgent = session.username;
+    const connected = getAgentConnectedAccounts(session.username, platform);
+    if (connected && connected.length > 0) {
+      filters.accountNumbers = connected.map(c => c.account).filter(Boolean);
+    }
+  }
+
+  const filtered = getAllTxs(filters);
   res.json(filtered);
 });
 
@@ -926,7 +938,13 @@ router.put('/bank-verification-method', requireAdminRole, (req, res) => {
   const platform = req.body.platform || req.query.platform || 'jember';
   const p = normalizePlatform(platform);
   const bank = req.body.bank ? String(req.body.bank).toLowerCase().trim() : null;
-  const method = req.body.bankVerificationMethod === 'screenshot' ? 'screenshot' : 'copy_paste';
+  const rawMethod = req.body.bankVerificationMethod || req.body.method;
+  let method = 'auto';
+  if (rawMethod === 'manual') method = 'manual';
+  else if (rawMethod === 'screenshot') method = 'screenshot';
+  else if (rawMethod === 'copy_paste') method = 'copy_paste';
+  else method = 'auto';
+
   const current = readJSON('settings.json') || {};
   if (!current.platforms) current.platforms = {};
   if (!current.platforms[p]) current.platforms[p] = {};
@@ -936,6 +954,7 @@ router.put('/bank-verification-method', requireAdminRole, (req, res) => {
     current.platforms[p].bankVerificationMethods[bank] = method;
     if (bank === 'ebirr') current.platforms[p].bankVerificationMethods['siinqee'] = method;
     if (bank === 'siinqee') current.platforms[p].bankVerificationMethods['ebirr'] = method;
+    if (bank === 'cbeagent') current.platforms[p].bankVerificationMethods['cbe_agent'] = method;
   } else {
     current.platforms[p].bankVerificationMethod = method;
   }
@@ -947,6 +966,138 @@ router.put('/bank-verification-method', requireAdminRole, (req, res) => {
     bank: bank || 'all',
     bankVerificationMethod: method,
     bankVerificationMethods: current.platforms[p].bankVerificationMethods
+  });
+});
+
+router.post('/manual-deposit/confirm', requireAuth, (req, res) => {
+  const { sessionId, verifiedAmount, transactionId } = req.body;
+  if (!sessionId) return res.status(400).json({ error: 'Missing sessionId' });
+
+  const tx = getTxById(sessionId);
+  if (!tx) return res.status(404).json({ error: 'Transaction not found' });
+
+  if (tx.status === 'verified') {
+    return res.status(400).json({ error: 'Transaction is already verified' });
+  }
+
+  const session = req.adminSession;
+  const isSuper = session.isSuperAdmin;
+  const isAgent = session.isAgent && !isSuper;
+
+  if (isAgent) {
+    const connected = getAgentConnectedAccounts(session.username, tx.platform);
+    const agentAccounts = (connected || []).map(c => c.account).filter(Boolean);
+    const isAssigned = (tx.assignedAgent && tx.assignedAgent.toLowerCase() === session.username.toLowerCase()) ||
+                       (tx.accountNumber && agentAccounts.includes(tx.accountNumber)) ||
+                       (tx.phoneNumber && agentAccounts.includes(tx.phoneNumber));
+    if (!isAssigned) {
+      return res.status(403).json({ error: 'Permission denied: This transaction is not assigned to you.' });
+    }
+  }
+
+  const parsedAmount = parseFloat(verifiedAmount);
+  const finalAmount = (!isNaN(parsedAmount) && parsedAmount > 0) ? parsedAmount : (tx.amount || tx.requestedAmount);
+
+  const cleanTxId = (transactionId && String(transactionId).trim())
+    ? String(transactionId).trim().toUpperCase()
+    : `MANUAL-${Date.now().toString(36).toUpperCase()}`;
+
+  // Deduct from float pool limit of connected agent / account
+  deductBankDepositLimit(
+    tx.platform,
+    tx.bank,
+    tx.accountNumber || tx.phoneNumber,
+    finalAmount,
+    null,
+    tx.assignedAgent || session.username
+  );
+
+  // Delete screenshot file from disk to save disk space
+  if (tx.receiptImage) {
+    try {
+      const imgFileName = path.basename(tx.receiptImage);
+      const imgPath = path.join(dataDir, 'screenshots', imgFileName);
+      if (fs.existsSync(imgPath)) {
+        fs.unlinkSync(imgPath);
+        console.log(`[Manual Deposit] Deleted screenshot ${imgFileName} on confirmation.`);
+      }
+    } catch (err) {
+      console.warn('[Manual Deposit] Could not delete screenshot:', err.message);
+    }
+  }
+
+  const updatedTx = updateTxStatus(sessionId, 'verified', {
+    verifiedAmount: finalAmount,
+    amount: finalAmount,
+    transactionId: cleanTxId,
+    receiptImage: null,
+    submittedAt: tx.submittedAt || Date.now()
+  });
+
+  // Webhook callback to platform
+  if (updatedTx && updatedTx.callbackUrl) {
+    const depositRoutes = require('./deposit');
+    if (typeof depositRoutes.createWebhookPayload === 'function' && typeof depositRoutes.sendWebhookWithRetry === 'function') {
+      const payload = depositRoutes.createWebhookPayload(updatedTx, 'verified', finalAmount, { transactionId: cleanTxId, manual: true });
+      depositRoutes.sendWebhookWithRetry(updatedTx.callbackUrl, payload);
+    }
+  }
+
+  res.json({
+    success: true,
+    message: 'Deposit confirmed successfully',
+    transaction: updatedTx
+  });
+});
+
+router.post('/manual-deposit/cancel', requireAuth, (req, res) => {
+  const { sessionId, reason } = req.body;
+  if (!sessionId) return res.status(400).json({ error: 'Missing sessionId' });
+
+  const session = req.adminSession;
+  if (!session.isSuperAdmin) {
+    return res.status(403).json({ error: 'Permission denied: Only Super Admin can cancel deposits.' });
+  }
+
+  const tx = getTxById(sessionId);
+  if (!tx) return res.status(404).json({ error: 'Transaction not found' });
+
+  if (tx.status === 'verified') {
+    return res.status(400).json({ error: 'Cannot cancel an already verified transaction' });
+  }
+
+  // Delete screenshot file from disk
+  if (tx.receiptImage) {
+    try {
+      const imgFileName = path.basename(tx.receiptImage);
+      const imgPath = path.join(dataDir, 'screenshots', imgFileName);
+      if (fs.existsSync(imgPath)) {
+        fs.unlinkSync(imgPath);
+        console.log(`[Manual Deposit] Deleted screenshot ${imgFileName} on cancellation.`);
+      }
+    } catch (err) {
+      console.warn('[Manual Deposit] Could not delete screenshot:', err.message);
+    }
+  }
+
+  const failReason = (reason && String(reason).trim()) ? String(reason).trim() : 'Cancelled by administrator';
+  const updatedTx = updateTxStatus(sessionId, 'failed', {
+    failReason,
+    receiptImage: null
+  });
+
+  if (updatedTx && updatedTx.callbackUrl) {
+    const depositRoutes = require('./deposit');
+    if (typeof depositRoutes.createWebhookPayload === 'function' && typeof depositRoutes.sendWebhookWithRetry === 'function') {
+      const payload = depositRoutes.createWebhookPayload(updatedTx, 'failed', 0, {}, failReason);
+      depositRoutes.sendWebhookWithRetry(updatedTx.callbackUrl, payload);
+    }
+  }
+
+  res.json({
+    success: true,
+    message: 'Deposit cancelled',
+    transaction: updatedTx
   });
 });
 
