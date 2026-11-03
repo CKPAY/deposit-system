@@ -598,8 +598,10 @@ function increaseBankWithdrawLimit(platform, bank, agentUsername, amount, specif
     }
 
     if (currentInit > 0 || currentRem > 0) {
-      const cap = currentInit > 0 ? currentInit : (currentRem + amt);
-      const newRemaining = Math.min(cap, Math.round((currentRem + amt) * 100) / 100);
+      // Auto-expand cap if remaining balance exceeds currentInit so a withdrawal never clamps/deletes float
+      const rawNewRem = Math.round((currentRem + amt) * 100) / 100;
+      const cap = Math.max(currentInit, rawNewRem);
+      const newRemaining = Math.max(currentRem, Math.min(cap, rawNewRem));
 
       fullData.agentLimits[agentKey] = {
         initialLimit: cap,
@@ -654,8 +656,9 @@ function increaseBankWithdrawLimit(platform, bank, agentUsername, amount, specif
       const slot = numData[p].numbers.find(n => normalizePhone(n.phone) === sAcc);
       if (slot && (slot.remainingLimit !== undefined && slot.remainingLimit !== null)) {
         const prev = Number(slot.remainingLimit);
-        const cap = (slot.initialLimit !== undefined && slot.initialLimit !== null) ? Number(slot.initialLimit) : (prev + amt);
-        slot.remainingLimit = Math.min(cap, Math.round((prev + amt) * 100) / 100);
+        const rawNew = Math.round((prev + amt) * 100) / 100;
+        const cap = (slot.initialLimit !== undefined && slot.initialLimit !== null) ? Math.max(Number(slot.initialLimit), rawNew) : rawNew;
+        slot.remainingLimit = Math.max(prev, Math.min(cap, rawNew));
         writeJSON('numbers.json', numData);
         return slot;
       }
@@ -671,8 +674,9 @@ function increaseBankWithdrawLimit(platform, bank, agentUsername, amount, specif
     }
     if (slot && slot.remainingLimit !== undefined && slot.remainingLimit !== null) {
       const prev = Number(slot.remainingLimit);
-      const cap = (slot.initialLimit !== undefined && slot.initialLimit !== null) ? Number(slot.initialLimit) : (prev + amt);
-      slot.remainingLimit = Math.min(cap, Math.round((prev + amt) * 100) / 100);
+      const rawNew = Math.round((prev + amt) * 100) / 100;
+      const cap = (slot.initialLimit !== undefined && slot.initialLimit !== null) ? Math.max(Number(slot.initialLimit), rawNew) : rawNew;
+      slot.remainingLimit = Math.max(prev, Math.min(cap, rawNew));
       writeJSON('bank_accounts.json', fullData);
       return slot;
     }
