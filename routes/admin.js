@@ -478,8 +478,21 @@ router.post('/bank-account-connect', requireAdminRole, (req, res) => {
   const isTelebirr = (b === 'telebirr');
 
   if (isTelebirr) {
-    const numbersList = Array.isArray(numData[p].numbers) ? numData[p].numbers : [];
-    const numSlot = numbersList.find(n => n.id === slotId);
+    let numbersList = Array.isArray(numData[p]?.numbers) ? numData[p].numbers : [];
+    let numSlot = numbersList.find(n => n.id === slotId);
+    if (!numSlot) {
+      // Auto-expand numbers list up to slotId so connecting a newly added slot always succeeds
+      const maxId = numbersList.reduce((max, n) => Math.max(max, Number(n?.id) || 0), 0);
+      const targetCount = Math.max(slotId, maxId, 20);
+      const expanded = [];
+      for (let i = 1; i <= targetCount; i++) {
+        const found = numbersList.find(n => n.id === i);
+        expanded.push(found || { id: i, phone: '', label: `Account ${i}`, activeUsers: 0, active: true });
+      }
+      numbersList = expanded;
+      numData[p] = { numbers: numbersList };
+      numSlot = numbersList.find(n => n.id === slotId);
+    }
     if (!numSlot) {
       return res.status(404).json({ error: 'Phone number slot not found' });
     }
@@ -713,22 +726,33 @@ function getPlatformNumbersData(platform = 'jember') {
     list = data.numbers;
   }
 
-  // Ensure exactly 20 slots for any platform
-  const full20 = [];
-  for (let i = 1; i <= 20; i++) {
+  // Preserve all existing slots (minimum 20 so base slots are never lost)
+  const maxExistingId = list.reduce((max, n) => Math.max(max, Number(n?.id) || 0), 0);
+  const totalSlots = Math.max(20, list.length, maxExistingId);
+
+  const fullList = [];
+  for (let i = 1; i <= totalSlots; i++) {
     const found = list.find(n => n.id === i);
-    full20.push(found || {
+    fullList.push(found || {
       id: i,
       phone: '',
       label: `Account ${i}`,
-      activeUsers: 0
+      activeUsers: 0,
+      active: true
     });
   }
+
+  // Also include any items that might have non-sequential or custom IDs if any
+  list.forEach(item => {
+    if (item && item.id && !fullList.some(n => n.id === item.id)) {
+      fullList.push(item);
+    }
+  });
 
   // Ensure slots connected to agents reflect live shared agent limit
   const bankData = readJSON('bank_accounts.json') || {};
   if (bankData.agentLimits) {
-    full20.forEach(slot => {
+    fullList.forEach(slot => {
       if (slot && slot.connectedAgent) {
         const agKey = normalizeAgent(slot.connectedAgent);
         if (bankData.agentLimits[agKey]) {
@@ -742,7 +766,7 @@ function getPlatformNumbersData(platform = 'jember') {
     });
   }
 
-  return full20;
+  return fullList;
 }
 
 router.get('/numbers', requireAdminRole, (req, res) => {
@@ -804,23 +828,46 @@ router.put('/numbers', requireAdminRole, (req, res) => {
 
   const oldNumbers = getPlatformNumbersData(p);
 
-  // Pad to exactly 20 slots and preserve agent connection & limit fields
+  // Preserve all slots (minimum 20, or as many as provided/existing)
+  const maxReqId = numbers.reduce((max, n) => Math.max(max, Number(n?.id) || 0), 0);
+  const maxOldId = oldNumbers.reduce((max, n) => Math.max(max, Number(n?.id) || 0), 0);
+  const totalSlots = Math.max(20, numbers.length, oldNumbers.length, maxReqId, maxOldId);
+
   const padded = [];
-  for (let i = 1; i <= 20; i++) {
+  for (let i = 1; i <= totalSlots; i++) {
     const found = numbers.find(n => n.id === i);
     const old = oldNumbers.find(n => n.id === i);
     if (found) {
       padded.push({
         ...old,
         ...found,
+        active: (found.active !== undefined) ? found.active : (old?.active ?? true),
         connectedAgent: (found.connectedAgent !== undefined) ? found.connectedAgent : (old?.connectedAgent || null),
         initialLimit: (found.initialLimit !== undefined) ? found.initialLimit : (old?.initialLimit ?? null),
         remainingLimit: (found.remainingLimit !== undefined) ? found.remainingLimit : (old?.remainingLimit ?? null),
       });
+    } else if (old) {
+      padded.push(old);
     } else {
-      padded.push(old || { id: i, phone: '', label: `Account ${i}`, activeUsers: 0 });
+      padded.push({ id: i, phone: '', label: `Account ${i}`, activeUsers: 0, active: true });
     }
   }
+
+  // Include any extra items from numbers array not caught by 1..totalSlots loop
+  numbers.forEach(item => {
+    if (item && item.id && !padded.some(n => n.id === item.id)) {
+      const old = oldNumbers.find(n => n.id === item.id);
+      padded.push({
+        ...old,
+        ...item,
+        active: (item.active !== undefined) ? item.active : (old?.active ?? true),
+        connectedAgent: (item.connectedAgent !== undefined) ? item.connectedAgent : (old?.connectedAgent || null),
+        initialLimit: (item.initialLimit !== undefined) ? item.initialLimit : (old?.initialLimit ?? null),
+        remainingLimit: (item.remainingLimit !== undefined) ? item.remainingLimit : (old?.remainingLimit ?? null),
+      });
+    }
+  });
+
   numbers = padded;
 
   const fullNumbersData = readJSON('numbers.json') || {};
