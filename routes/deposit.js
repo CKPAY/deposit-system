@@ -991,13 +991,15 @@ function getApiKeyForPhone(phoneNumber, settings, platform = 'jember') {
   let phoneIndex = numbers.findIndex(n => normalizePhone(n.phone) === normTarget);
   if (phoneIndex === -1) phoneIndex = 0;
 
-  // 20 phone numbers mapped to 5 API keys (4 numbers per key)
-  const keyIndex = Math.floor(phoneIndex / 4);
-  const keys = Array.isArray(settings.apiKeys) ? settings.apiKeys : [];
-  let selectedKey = keys[keyIndex];
-  // Fallback if specific slot key is blank
+  // Phone numbers mapped to API keys (4 numbers per key, cycling through available keys)
+  const rawKeyIndex = Math.floor(phoneIndex / 4);
+  const keys = Array.isArray(settings.apiKeys) ? settings.apiKeys.filter(k => k && k.trim()) : [];
+  let selectedKey = '';
+  if (keys.length > 0) {
+    selectedKey = keys[rawKeyIndex % keys.length] || keys[0];
+  }
   if (!selectedKey) {
-    selectedKey = keys.find(k => k && k.trim()) || settings.verifyApiKey || '';
+    selectedKey = settings.verifyApiKey || '';
   }
 
   return selectedKey;
